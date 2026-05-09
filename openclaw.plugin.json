@@ -1,0 +1,77 @@
+{
+  "id": "schejo",
+  "name": "Schejo",
+  "description": "Schejo iOS app channel for OpenClaw thin-slice pairing.",
+  "version": "0.1.0",
+  "activation": {
+    "onStartup": true
+  },
+  "channels": [
+    "schejo"
+  ],
+  "skills": [
+    "./skills"
+  ],
+  "channelEnvVars": {
+    "schejo": [
+      "SCHEJO_PAIRING_CODE",
+      "SCHEJO_CLOUD_URL",
+      "SCHEJO_OPENCLAW_USER_ID"
+    ]
+  },
+  "uiHints": {
+    "pairingCode": {
+      "label": "Pairing code",
+      "help": "The 8-character code shown in the Schejo iPhone app."
+    },
+    "cloudUrl": {
+      "label": "Schejo cloud URL",
+      "help": "Base URL for the Schejo cloud relay."
+    },
+    "openclawUserId": {
+      "label": "OpenClaw user id",
+      "help": "Optional explicit OpenClaw user id when the runtime does not expose one."
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "pairingCode": {
+        "type": "string"
+      },
+      "cloudUrl": {
+        "type": "string"
+      },
+      "openclawUserId": {
+        "type": "string"
+      }
+    }
+  },
+  "channelConfigs": {
+    "schejo": {
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pairingCode": {
+            "type": "string"
+          },
+          "cloudUrl": {
+            "type": "string"
+          },
+          "openclawUserId": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

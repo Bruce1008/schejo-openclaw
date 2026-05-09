@@ -1,0 +1,66 @@
+{
+  "name": "schejo",
+  "version": "0.1.0",
+  "description": "Schejo iOS app channel for OpenClaw thin-slice pairing",
+  "type": "module",
+  "main": "./dist/extensions/index.js",
+  "exports": {
+    ".": "./dist/extensions/index.js"
+  },
+  "files": [
+    "dist/",
+    "extensions/",
+    "skills/",
+    "SKILL.md",
+    "README.md",
+    "openclaw.mjs",
+    "openclaw.plugin.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.5.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "openclaw": "2026.5.7",
+    "typescript": "^5.9.3"
+  },
+  "openclaw": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "runtimeExtensions": [
+      "./dist/extensions/index.js"
+    ],
+    "setupEntry": "./extensions/setup-entry.ts",
+    "runtimeSetupEntry": "./dist/extensions/setup-entry.js",
+    "compat": {
+      "pluginApi": ">=2026.5.7",
+      "minGatewayVersion": "2026.5.7"
+    },
+    "build": {
+      "openclawVersion": "2026.5.7",
+      "pluginSdkVersion": "2026.5.7"
+    },
+    "channel": {
+      "id": "schejo",
+      "label": "Schejo",
+      "selectionLabel": "Schejo iOS",
+      "detailLabel": "Schejo iOS app channel",
+      "docsLabel": "schejo",
+      "blurb": "Private iOS body-data channel for the Schejo thin slice.",
+      "aliases": [
+        "schejo-ios"
+      ],
+      "markdownCapable": true,
+      "exposure": {
+        "configured": true,
+        "setup": true,
+        "docs": false
+      }
+    }
+  }
+}
