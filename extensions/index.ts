@@ -28,6 +28,7 @@ type SchejoRuntimeState = {
 type SchejoChatChannelParams = Parameters<typeof createChatChannelPlugin<SchejoAccount>>[0];
 
 let runtimeState: SchejoRuntimeState | null = null;
+let confirmedPairKey: string | null = null;
 
 function log(message: string): void {
   console.error(message);
@@ -65,7 +66,11 @@ function resolvePluginConfig(api: OpenClawPluginApi): JsonRecord {
   const fromApi = asRecord(api.pluginConfig);
   if (Object.keys(fromApi).length > 0) return fromApi;
 
-  const cfg = asRecord(api.config);
+  return resolvePluginConfigFromConfig(api.config);
+}
+
+function resolvePluginConfigFromConfig(config: OpenClawConfig): JsonRecord {
+  const cfg = asRecord(config);
   return asRecord(
     pickPath(cfg, ["plugins", "entries", "schejo", "config"]) ??
       pickPath(cfg, ["plugins", "schejo", "config"]),
@@ -88,6 +93,17 @@ function resolvePairingCode(api: OpenClawPluginApi): string | undefined {
     pickPath(anyApi, ["installContext", "pairingCode"]),
     pickPath(anyApi, ["installContext", "config", "pairingCode"]),
     pickPath(anyApi, ["setup", "pairingCode"]),
+  );
+}
+
+function resolvePairingCodeFromConfig(cfg: OpenClawConfig): string | undefined {
+  const pluginConfig = resolvePluginConfigFromConfig(cfg);
+  const channelConfig = resolveChannelConfig(cfg);
+
+  return firstString(
+    process.env.SCHEJO_PAIRING_CODE,
+    pluginConfig.pairingCode,
+    channelConfig.pairingCode,
   );
 }
 
@@ -137,6 +153,24 @@ function resolveOpenClawUserId(api: OpenClawPluginApi): string {
   return openclawUserId;
 }
 
+function resolveOpenClawUserIdFromConfig(cfg: OpenClawConfig): string {
+  const pluginConfig = resolvePluginConfigFromConfig(cfg);
+  const channelConfig = resolveChannelConfig(cfg);
+
+  const resolved = firstString(
+    process.env.SCHEJO_OPENCLAW_USER_ID,
+    pluginConfig.openclawUserId,
+    channelConfig.openclawUserId,
+  );
+
+  if (resolved) return resolved;
+
+  const fallback = firstString(process.env.USER, process.env.LOGNAME) ?? "local";
+  const openclawUserId = `openclaw-${fallback}`;
+  log(`[schejo] WARN: cannot read openclaw_user_id from channel runtime; using ${openclawUserId}`);
+  return openclawUserId;
+}
+
 function endpoint(baseUrl: string, path: string): string {
   const normalizedBase = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
   return new URL(path.replace(/^\/+/, ""), normalizedBase).toString();
@@ -163,6 +197,58 @@ async function postJson(url: string, body: JsonRecord): Promise<void> {
   }
 }
 
+async function confirmPair(params: {
+  code: string;
+  cloudUrl: string;
+  openclawUserId: string;
+}): Promise<void> {
+  const pairKey = `${params.code}:${params.openclawUserId}:${params.cloudUrl}`;
+  runtimeState = {
+    cloudUrl: params.cloudUrl,
+    openclawUserId: params.openclawUserId,
+  };
+
+  log(`[schejo] received_code: ${params.code}`);
+
+  if (confirmedPairKey === pairKey) {
+    log("[schejo] pair_confirmed");
+    return;
+  }
+
+  await postJson(endpoint(params.cloudUrl, "/v1/pair/confirm"), {
+    code: params.code,
+    openclaw_user_id: params.openclawUserId,
+  });
+  confirmedPairKey = pairKey;
+  log("[schejo] pair_confirmed");
+}
+
+async function pairWithConfig(cfg: OpenClawConfig): Promise<void> {
+  const code = resolvePairingCodeFromConfig(cfg);
+  if (!code) {
+    log("[schejo] FATAL: cannot read pairing_code");
+    return;
+  }
+
+  try {
+    await confirmPair({
+      code,
+      cloudUrl: resolveCloudUrlFromConfig(cfg),
+      openclawUserId: resolveOpenClawUserIdFromConfig(cfg),
+    });
+  } catch (error) {
+    log(`[schejo] pair_confirm failed: ${formatError(error)}`);
+  }
+}
+
+function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+}
+
 function resolveAccount(cfg: OpenClawConfig, accountId?: string | null): SchejoAccount {
   return {
     accountId: accountId ?? DEFAULT_ACCOUNT_ID,
@@ -172,7 +258,8 @@ function resolveAccount(cfg: OpenClawConfig, accountId?: string | null): SchejoA
   };
 }
 
-const schejoChannelBase = createChannelPluginBase({
+const schejoChannelBase = {
+  ...createChannelPluginBase({
     id: CHANNEL_ID,
     meta: {
       label: "Schejo",
@@ -245,7 +332,19 @@ const schejoChannelBase = createChannelPluginBase({
         return next;
       },
     },
-  }) as SchejoChatChannelParams["base"];
+  }),
+  gateway: {
+    async startAccount(ctx) {
+      log(`[schejo] start_account account=${ctx.accountId}`);
+      await pairWithConfig(ctx.cfg);
+      await waitForAbort(ctx.abortSignal);
+      log(`[schejo] stop_account account=${ctx.accountId}`);
+    },
+    async stopAccount(ctx) {
+      log(`[schejo] stop_account account=${ctx.accountId}`);
+    },
+  },
+} as SchejoChatChannelParams["base"];
 
 export const schejoChannelPlugin = createChatChannelPlugin<SchejoAccount>({
   base: schejoChannelBase,
@@ -297,16 +396,13 @@ async function pairWithCloud(api: OpenClawPluginApi): Promise<void> {
 
   const cloudUrl = resolveCloudUrl(api);
   const openclawUserId = resolveOpenClawUserId(api);
-  runtimeState = { cloudUrl, openclawUserId };
-
-  log(`[schejo] received_code: ${code}`);
 
   try {
-    await postJson(endpoint(cloudUrl, "/v1/pair/confirm"), {
+    await confirmPair({
       code,
-      openclaw_user_id: openclawUserId,
+      cloudUrl,
+      openclawUserId,
     });
-    log("[schejo] pair_confirmed");
   } catch (error) {
     log(`[schejo] pair_confirm failed: ${formatError(error)}`);
   }

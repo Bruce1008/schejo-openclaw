@@ -4,6 +4,7 @@ const CHANNEL_ID = "schejo";
 const DEFAULT_ACCOUNT_ID = "ios";
 const DEFAULT_CLOUD_URL = "http://111.230.239.136/schejo";
 let runtimeState = null;
+let confirmedPairKey = null;
 function log(message) {
     console.error(message);
 }
@@ -38,7 +39,10 @@ function resolvePluginConfig(api) {
     const fromApi = asRecord(api.pluginConfig);
     if (Object.keys(fromApi).length > 0)
         return fromApi;
-    const cfg = asRecord(api.config);
+    return resolvePluginConfigFromConfig(api.config);
+}
+function resolvePluginConfigFromConfig(config) {
+    const cfg = asRecord(config);
     return asRecord(pickPath(cfg, ["plugins", "entries", "schejo", "config"]) ??
         pickPath(cfg, ["plugins", "schejo", "config"]));
 }
@@ -50,6 +54,11 @@ function resolvePairingCode(api) {
     const channelConfig = resolveChannelConfig(api.config);
     const anyApi = api;
     return firstString(process.env.SCHEJO_PAIRING_CODE, pluginConfig.pairingCode, channelConfig.pairingCode, pickPath(anyApi, ["installContext", "pairingCode"]), pickPath(anyApi, ["installContext", "config", "pairingCode"]), pickPath(anyApi, ["setup", "pairingCode"]));
+}
+function resolvePairingCodeFromConfig(cfg) {
+    const pluginConfig = resolvePluginConfigFromConfig(cfg);
+    const channelConfig = resolveChannelConfig(cfg);
+    return firstString(process.env.SCHEJO_PAIRING_CODE, pluginConfig.pairingCode, channelConfig.pairingCode);
 }
 function resolveCloudUrlFromConfig(cfg) {
     const cfgRecord = asRecord(cfg);
@@ -71,6 +80,17 @@ function resolveOpenClawUserId(api) {
     const fallback = firstString(process.env.USER, process.env.LOGNAME) ?? "local";
     const openclawUserId = `openclaw-${fallback}`;
     log(`[schejo] WARN: cannot read openclaw_user_id from runtime; using ${openclawUserId}`);
+    return openclawUserId;
+}
+function resolveOpenClawUserIdFromConfig(cfg) {
+    const pluginConfig = resolvePluginConfigFromConfig(cfg);
+    const channelConfig = resolveChannelConfig(cfg);
+    const resolved = firstString(process.env.SCHEJO_OPENCLAW_USER_ID, pluginConfig.openclawUserId, channelConfig.openclawUserId);
+    if (resolved)
+        return resolved;
+    const fallback = firstString(process.env.USER, process.env.LOGNAME) ?? "local";
+    const openclawUserId = `openclaw-${fallback}`;
+    log(`[schejo] WARN: cannot read openclaw_user_id from channel runtime; using ${openclawUserId}`);
     return openclawUserId;
 }
 function endpoint(baseUrl, path) {
@@ -96,6 +116,48 @@ async function postJson(url, body) {
         throw new Error(`HTTP ${response.status}${detail}`);
     }
 }
+async function confirmPair(params) {
+    const pairKey = `${params.code}:${params.openclawUserId}:${params.cloudUrl}`;
+    runtimeState = {
+        cloudUrl: params.cloudUrl,
+        openclawUserId: params.openclawUserId,
+    };
+    log(`[schejo] received_code: ${params.code}`);
+    if (confirmedPairKey === pairKey) {
+        log("[schejo] pair_confirmed");
+        return;
+    }
+    await postJson(endpoint(params.cloudUrl, "/v1/pair/confirm"), {
+        code: params.code,
+        openclaw_user_id: params.openclawUserId,
+    });
+    confirmedPairKey = pairKey;
+    log("[schejo] pair_confirmed");
+}
+async function pairWithConfig(cfg) {
+    const code = resolvePairingCodeFromConfig(cfg);
+    if (!code) {
+        log("[schejo] FATAL: cannot read pairing_code");
+        return;
+    }
+    try {
+        await confirmPair({
+            code,
+            cloudUrl: resolveCloudUrlFromConfig(cfg),
+            openclawUserId: resolveOpenClawUserIdFromConfig(cfg),
+        });
+    }
+    catch (error) {
+        log(`[schejo] pair_confirm failed: ${formatError(error)}`);
+    }
+}
+function waitForAbort(signal) {
+    if (signal.aborted)
+        return Promise.resolve();
+    return new Promise((resolve) => {
+        signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+}
 function resolveAccount(cfg, accountId) {
     return {
         accountId: accountId ?? DEFAULT_ACCOUNT_ID,
@@ -104,78 +166,91 @@ function resolveAccount(cfg, accountId) {
         enabled: true,
     };
 }
-const schejoChannelBase = createChannelPluginBase({
-    id: CHANNEL_ID,
-    meta: {
-        label: "Schejo",
-        selectionLabel: "Schejo iOS",
-        detailLabel: "Schejo iOS app channel",
-        docsPath: "/channels/schejo",
-        docsLabel: "schejo",
-        blurb: "Private iOS body-data channel for the Schejo thin slice.",
-        aliases: ["schejo-ios"],
-        markdownCapable: true,
-        exposure: {
-            configured: true,
-            setup: true,
-            docs: false,
-        },
-    },
-    config: {
-        listAccountIds() {
-            return [DEFAULT_ACCOUNT_ID];
-        },
-        defaultAccountId() {
-            return DEFAULT_ACCOUNT_ID;
-        },
-        resolveAccount,
-        inspectAccount(cfg, accountId) {
-            const account = resolveAccount(cfg, accountId);
-            return {
-                enabled: account.enabled,
-                configured: account.configured,
-                accountId: account.accountId,
-                cloudUrl: account.cloudUrl,
-            };
-        },
-        isEnabled() {
-            return true;
-        },
-        isConfigured() {
-            return true;
-        },
-        describeAccount(account) {
-            return {
-                accountId: account.accountId,
-                name: "Schejo iOS",
-                enabled: true,
+const schejoChannelBase = {
+    ...createChannelPluginBase({
+        id: CHANNEL_ID,
+        meta: {
+            label: "Schejo",
+            selectionLabel: "Schejo iOS",
+            detailLabel: "Schejo iOS app channel",
+            docsPath: "/channels/schejo",
+            docsLabel: "schejo",
+            blurb: "Private iOS body-data channel for the Schejo thin slice.",
+            aliases: ["schejo-ios"],
+            markdownCapable: true,
+            exposure: {
                 configured: true,
-                connected: Boolean(runtimeState),
-            };
+                setup: true,
+                docs: false,
+            },
         },
-        resolveDefaultTo() {
-            return DEFAULT_ACCOUNT_ID;
-        },
-    },
-    setup: {
-        resolveAccountId() {
-            return DEFAULT_ACCOUNT_ID;
-        },
-        applyAccountConfig({ cfg, input }) {
-            const next = structuredClone(cfg);
-            next.channels = {
-                ...asRecord(next.channels),
-                schejo: {
-                    ...asRecord(next.channels?.schejo),
+        config: {
+            listAccountIds() {
+                return [DEFAULT_ACCOUNT_ID];
+            },
+            defaultAccountId() {
+                return DEFAULT_ACCOUNT_ID;
+            },
+            resolveAccount,
+            inspectAccount(cfg, accountId) {
+                const account = resolveAccount(cfg, accountId);
+                return {
+                    enabled: account.enabled,
+                    configured: account.configured,
+                    accountId: account.accountId,
+                    cloudUrl: account.cloudUrl,
+                };
+            },
+            isEnabled() {
+                return true;
+            },
+            isConfigured() {
+                return true;
+            },
+            describeAccount(account) {
+                return {
+                    accountId: account.accountId,
+                    name: "Schejo iOS",
                     enabled: true,
-                    pairingCode: readString(input.code),
-                    cloudUrl: readString(input.url) ?? DEFAULT_CLOUD_URL,
-                },
-            };
-            return next;
+                    configured: true,
+                    connected: Boolean(runtimeState),
+                };
+            },
+            resolveDefaultTo() {
+                return DEFAULT_ACCOUNT_ID;
+            },
+        },
+        setup: {
+            resolveAccountId() {
+                return DEFAULT_ACCOUNT_ID;
+            },
+            applyAccountConfig({ cfg, input }) {
+                const next = structuredClone(cfg);
+                next.channels = {
+                    ...asRecord(next.channels),
+                    schejo: {
+                        ...asRecord(next.channels?.schejo),
+                        enabled: true,
+                        pairingCode: readString(input.code),
+                        cloudUrl: readString(input.url) ?? DEFAULT_CLOUD_URL,
+                    },
+                };
+                return next;
+            },
+        },
+    }),
+    gateway: {
+        async startAccount(ctx) {
+            log(`[schejo] start_account account=${ctx.accountId}`);
+            await pairWithConfig(ctx.cfg);
+            await waitForAbort(ctx.abortSignal);
+            log(`[schejo] stop_account account=${ctx.accountId}`);
+        },
+        async stopAccount(ctx) {
+            log(`[schejo] stop_account account=${ctx.accountId}`);
         },
     },
-});
+};
 export const schejoChannelPlugin = createChatChannelPlugin({
     base: schejoChannelBase,
     threading: {
@@ -222,14 +297,12 @@ async function pairWithCloud(api) {
     }
     const cloudUrl = resolveCloudUrl(api);
     const openclawUserId = resolveOpenClawUserId(api);
-    runtimeState = { cloudUrl, openclawUserId };
-    log(`[schejo] received_code: ${code}`);
     try {
-        await postJson(endpoint(cloudUrl, "/v1/pair/confirm"), {
+        await confirmPair({
             code,
-            openclaw_user_id: openclawUserId,
+            cloudUrl,
+            openclawUserId,
         });
-        log("[schejo] pair_confirmed");
     }
     catch (error) {
         log(`[schejo] pair_confirm failed: ${formatError(error)}`);
