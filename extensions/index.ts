@@ -30,6 +30,10 @@ type SchejoRuntimeState = {
   openclawUserId: string;
 };
 
+type SchejoSseEvent = {
+  body?: unknown;
+};
+
 type SchejoChatChannelParams = Parameters<typeof createChatChannelPlugin<SchejoAccount>>[0];
 
 let runtimeState: SchejoRuntimeState | null = null;
@@ -203,6 +207,129 @@ async function postJson(url: string, body: JsonRecord): Promise<void> {
   }
 }
 
+function wait(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(resolve, ms);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timeout);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
+
+function parseSseData(frame: string): string | undefined {
+  const lines = frame.replace(/\r/g, "").split("\n");
+  const dataLines = lines
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart());
+
+  if (dataLines.length === 0) return undefined;
+  return dataLines.join("\n");
+}
+
+async function readSseStream(params: {
+  response: Response;
+  signal: AbortSignal;
+  onEvent: (event: SchejoSseEvent) => void;
+}): Promise<void> {
+  if (!params.response.body) {
+    throw new Error("SSE response body is empty");
+  }
+
+  const reader = params.response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (!params.signal.aborted) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      buffer += decoder.decode(value, { stream: true });
+
+      while (true) {
+        const frameEnd = buffer.indexOf("\n\n");
+        if (frameEnd === -1) break;
+
+        const frame = buffer.slice(0, frameEnd);
+        buffer = buffer.slice(frameEnd + 2);
+
+        const data = parseSseData(frame);
+        if (!data) continue;
+
+        try {
+          params.onEvent(JSON.parse(data) as SchejoSseEvent);
+        } catch (error) {
+          log(`[schejo] inbound_error: invalid SSE data ${formatError(error)}`);
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function handleInboundEvent(event: SchejoSseEvent): void {
+  const body = readString(event.body);
+  if (!body) {
+    log("[schejo] inbound_error: missing body");
+    return;
+  }
+
+  log(`[schejo] inbound: ${body}`);
+}
+
+async function runSseLoop(params: {
+  cloudUrl: string;
+  openclawUserId: string;
+  signal: AbortSignal;
+}): Promise<void> {
+  while (!params.signal.aborted) {
+    const streamUrl = endpoint(
+      params.cloudUrl,
+      `/v1/openclaw-stream?openclaw_user_id=${encodeURIComponent(params.openclawUserId)}`,
+    );
+
+    try {
+      log(`[schejo] sse_connecting: ${streamUrl}`);
+      const response = await fetch(streamUrl, {
+        headers: {
+          accept: "text/event-stream",
+        },
+        signal: params.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      log("[schejo] sse_connected");
+      await readSseStream({
+        response,
+        signal: params.signal,
+        onEvent: handleInboundEvent,
+      });
+
+      if (!params.signal.aborted) {
+        log("[schejo] sse_disconnected");
+      }
+    } catch (error) {
+      if (!params.signal.aborted) {
+        log(`[schejo] sse_error: ${formatError(error)}`);
+      }
+    }
+
+    if (!params.signal.aborted) {
+      await wait(3000, params.signal);
+    }
+  }
+}
+
 async function confirmPair(params: {
   code: string;
   cloudUrl: string;
@@ -371,7 +498,15 @@ const schejoChannelBase = {
     async startAccount(ctx) {
       logWithContext(ctx, `[schejo] start_account account=${ctx.accountId}`);
       await pairWithConfig(ctx.cfg);
-      await waitForAbort(ctx.abortSignal);
+      if (runtimeState) {
+        await runSseLoop({
+          cloudUrl: runtimeState.cloudUrl,
+          openclawUserId: runtimeState.openclawUserId,
+          signal: ctx.abortSignal,
+        });
+      } else {
+        await waitForAbort(ctx.abortSignal);
+      }
       logWithContext(ctx, `[schejo] stop_account account=${ctx.accountId}`);
     },
     async stopAccount(ctx) {
