@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createChannelPluginBase, createChatChannelPlugin, defineChannelPluginEntry, } from "openclaw/plugin-sdk/channel-core";
+import { createRawChannelSendResultAdapter, } from "openclaw/plugin-sdk/channel-send-result";
 const CHANNEL_ID = "schejo";
 const DEFAULT_ACCOUNT_ID = "ios";
 let runtimeState = null;
@@ -7,34 +8,10 @@ let confirmedPairKey = null;
 function log(message) {
     console.error(message);
 }
-function loggerFor(ctx) {
-    const record = asRecord(ctx);
-    const deps = asRecord(record.deps);
-    const candidates = [
-        asRecord(record.logger),
-        asRecord(record.log),
-        asRecord(deps.logger),
-        asRecord(deps.log),
-    ];
-    for (const candidate of candidates) {
-        const info = candidate.info;
-        if (typeof info === "function") {
-            return info.bind(candidate);
-        }
-    }
-    return log;
-}
-function logWithContext(ctx, message) {
-    loggerFor(ctx)(message);
-}
-function toOutboundDeliveryResult(result) {
-    return {
-        channel: CHANNEL_ID,
-        ok: result.ok,
-        messageId: result.messageId ?? "",
-        ...(result.error ? { error: new Error(result.error) } : {}),
-        ...(result.retryable === undefined ? {} : { retryable: result.retryable }),
-    };
+function logWithContext(input, message) {
+    const ctx = input;
+    const emit = ctx.log?.info?.bind(ctx.log) ?? log;
+    emit(message);
 }
 function asRecord(value) {
     return value && typeof value === "object" ? value : {};
@@ -287,7 +264,7 @@ const schejoChannelBase = {
                 policy: getDmPolicy(),
                 allowFrom: getAllowFrom(),
                 allowFromPath: "channels.schejo.allowFrom",
-                approveHint: "Pair Schejo from the iPhone app first.",
+                approveHint: "在 iPhone app 上重新生成配对码并粘贴安装 prompt",
             }),
         },
     }),
@@ -316,40 +293,41 @@ export const schejoChannelPlugin = createChatChannelPlugin({
                 to: params.to ?? DEFAULT_ACCOUNT_ID,
             };
         },
-        async sendText(ctx) {
-            const text = ctx.text ?? "";
-            logWithContext(ctx, `[schejo] outbound: ${text}`);
-            if (!runtimeState) {
-                logWithContext(ctx, "[schejo] reply_post_failed: runtime is not paired");
+        ...createRawChannelSendResultAdapter({
+            channel: CHANNEL_ID,
+            async sendText(ctx) {
+                const text = ctx.text ?? "";
+                logWithContext(ctx, `[schejo] outbound: ${text}`);
+                if (!runtimeState) {
+                    logWithContext(ctx, "[schejo] reply_post_failed: runtime is not paired; not retrying");
+                    const result = {
+                        ok: false,
+                        error: "runtime is not paired",
+                    };
+                    return result;
+                }
+                try {
+                    await postJson(endpoint(runtimeState.cloudUrl, "/v1/openclaw-reply"), {
+                        openclaw_user_id: runtimeState.openclawUserId,
+                        reply_text: text,
+                    });
+                }
+                catch (error) {
+                    const message = `POST /v1/openclaw-reply: ${formatError(error)}`;
+                    logWithContext(ctx, `[schejo] reply_post_failed: ${message}; not retrying`);
+                    const result = {
+                        ok: false,
+                        error: message,
+                    };
+                    return result;
+                }
                 const result = {
-                    ok: false,
-                    error: "runtime is not paired",
-                    retryable: false,
+                    ok: true,
+                    messageId: `schejo-${randomUUID()}`,
                 };
-                return toOutboundDeliveryResult(result);
-            }
-            try {
-                await postJson(endpoint(runtimeState.cloudUrl, "/v1/openclaw-reply"), {
-                    openclaw_user_id: runtimeState.openclawUserId,
-                    reply_text: text,
-                });
-            }
-            catch (error) {
-                const message = `POST /v1/openclaw-reply: ${formatError(error)}`;
-                logWithContext(ctx, `[schejo] reply_post_failed: ${message}`);
-                const result = {
-                    ok: false,
-                    error: message,
-                    retryable: false,
-                };
-                return toOutboundDeliveryResult(result);
-            }
-            const result = {
-                ok: true,
-                messageId: `schejo-${randomUUID()}`,
-            };
-            return toOutboundDeliveryResult(result);
-        },
+                return result;
+            },
+        }),
     },
 });
 async function pairWithCloud(api) {
