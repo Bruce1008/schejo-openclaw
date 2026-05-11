@@ -9,9 +9,22 @@ import {
 
 const CHANNEL_ID = "schejo";
 const DEFAULT_ACCOUNT_ID = "ios";
-const DEFAULT_CLOUD_URL = "http://111.230.239.136/schejo";
 
 type JsonRecord = Record<string, unknown>;
+type SchejoSendResult = {
+  ok: boolean;
+  messageId?: string;
+  error?: string;
+  retryable?: boolean;
+};
+
+type SchejoOutboundDeliveryResult = {
+  channel: typeof CHANNEL_ID;
+  ok: boolean;
+  messageId: string;
+  error?: Error;
+  retryable?: boolean;
+};
 
 type SchejoAccount = {
   accountId: string;
@@ -32,6 +45,40 @@ let confirmedPairKey: string | null = null;
 
 function log(message: string): void {
   console.error(message);
+}
+
+function loggerFor(ctx: unknown): (message: string) => void {
+  const record = asRecord(ctx);
+  const deps = asRecord(record.deps);
+  const candidates = [
+    asRecord(record.logger),
+    asRecord(record.log),
+    asRecord(deps.logger),
+    asRecord(deps.log),
+  ];
+
+  for (const candidate of candidates) {
+    const info = candidate.info;
+    if (typeof info === "function") {
+      return info.bind(candidate) as (message: string) => void;
+    }
+  }
+
+  return log;
+}
+
+function logWithContext(ctx: unknown, message: string): void {
+  loggerFor(ctx)(message);
+}
+
+function toOutboundDeliveryResult(result: SchejoSendResult): SchejoOutboundDeliveryResult {
+  return {
+    channel: CHANNEL_ID,
+    ok: result.ok,
+    messageId: result.messageId ?? "",
+    ...(result.error ? { error: new Error(result.error) } : {}),
+    ...(result.retryable === undefined ? {} : { retryable: result.retryable }),
+  };
 }
 
 function asRecord(value: unknown): JsonRecord {
@@ -107,25 +154,20 @@ function resolvePairingCodeFromConfig(cfg: OpenClawConfig): string | undefined {
   );
 }
 
-function resolveCloudUrlFromConfig(cfg: OpenClawConfig): string {
+function resolveCloudUrlFromConfig(cfg: OpenClawConfig): string | undefined {
   const cfgRecord = asRecord(cfg);
-  return (
-    firstString(
-      process.env.SCHEJO_CLOUD_URL,
-      pickPath(cfgRecord, ["plugins", "entries", "schejo", "config", "cloudUrl"]),
-      pickPath(cfgRecord, ["plugins", "schejo", "config", "cloudUrl"]),
-      pickPath(cfgRecord, ["channels", "schejo", "cloudUrl"]),
-    ) ?? DEFAULT_CLOUD_URL
+  return firstString(
+    process.env.SCHEJO_CLOUD_URL,
+    pickPath(cfgRecord, ["plugins", "entries", "schejo", "config", "cloudUrl"]),
+    pickPath(cfgRecord, ["plugins", "schejo", "config", "cloudUrl"]),
+    pickPath(cfgRecord, ["channels", "schejo", "cloudUrl"]),
   );
 }
 
-function resolveCloudUrl(api: OpenClawPluginApi): string {
+function resolveCloudUrl(api: OpenClawPluginApi): string | undefined {
   const pluginConfig = resolvePluginConfig(api);
   const channelConfig = resolveChannelConfig(api.config);
-  return (
-    firstString(process.env.SCHEJO_CLOUD_URL, pluginConfig.cloudUrl, channelConfig.cloudUrl) ??
-    DEFAULT_CLOUD_URL
-  );
+  return firstString(process.env.SCHEJO_CLOUD_URL, pluginConfig.cloudUrl, channelConfig.cloudUrl);
 }
 
 function resolveOpenClawUserId(api: OpenClawPluginApi): string {
@@ -230,10 +272,16 @@ async function pairWithConfig(cfg: OpenClawConfig): Promise<void> {
     return;
   }
 
+  const cloudUrl = resolveCloudUrlFromConfig(cfg);
+  if (!cloudUrl) {
+    log("[schejo] FATAL: SCHEJO_CLOUD_URL not set");
+    return;
+  }
+
   try {
     await confirmPair({
       code,
-      cloudUrl: resolveCloudUrlFromConfig(cfg),
+      cloudUrl,
       openclawUserId: resolveOpenClawUserIdFromConfig(cfg),
     });
   } catch (error) {
@@ -252,10 +300,18 @@ function waitForAbort(signal: AbortSignal): Promise<void> {
 function resolveAccount(cfg: OpenClawConfig, accountId?: string | null): SchejoAccount {
   return {
     accountId: accountId ?? DEFAULT_ACCOUNT_ID,
-    cloudUrl: resolveCloudUrlFromConfig(cfg),
+    cloudUrl: resolveCloudUrlFromConfig(cfg) ?? "",
     configured: true,
     enabled: true,
   };
+}
+
+function getDmPolicy(): string {
+  return "pairing";
+}
+
+function getAllowFrom(): Array<string | number> {
+  return [];
 }
 
 const schejoChannelBase = {
@@ -275,6 +331,11 @@ const schejoChannelBase = {
         setup: true,
         docs: false,
       },
+    },
+    capabilities: {
+      chatTypes: ["direct"],
+      reactions: false,
+      threads: false,
     },
     config: {
       listAccountIds() {
@@ -320,28 +381,37 @@ const schejoChannelBase = {
         const next = structuredClone(cfg) as OpenClawConfig & {
           channels?: Record<string, JsonRecord>;
         };
+        const cloudUrl = readString(input.url);
         next.channels = {
           ...asRecord(next.channels),
           schejo: {
             ...asRecord(next.channels?.schejo),
             enabled: true,
             pairingCode: readString(input.code),
-            cloudUrl: readString(input.url) ?? DEFAULT_CLOUD_URL,
+            ...(cloudUrl ? { cloudUrl } : {}),
           },
         };
         return next;
       },
     },
+    security: {
+      resolveDmPolicy: () => ({
+        policy: getDmPolicy(),
+        allowFrom: getAllowFrom(),
+        allowFromPath: "channels.schejo.allowFrom",
+        approveHint: "Pair Schejo from the iPhone app first.",
+      }),
+    },
   }),
   gateway: {
     async startAccount(ctx) {
-      log(`[schejo] start_account account=${ctx.accountId}`);
+      logWithContext(ctx, `[schejo] start_account account=${ctx.accountId}`);
       await pairWithConfig(ctx.cfg);
       await waitForAbort(ctx.abortSignal);
-      log(`[schejo] stop_account account=${ctx.accountId}`);
+      logWithContext(ctx, `[schejo] stop_account account=${ctx.accountId}`);
     },
     async stopAccount(ctx) {
-      log(`[schejo] stop_account account=${ctx.accountId}`);
+      logWithContext(ctx, `[schejo] stop_account account=${ctx.accountId}`);
     },
   },
 } as SchejoChatChannelParams["base"];
@@ -352,37 +422,48 @@ export const schejoChannelPlugin = createChatChannelPlugin<SchejoAccount>({
     topLevelReplyToMode: "direct",
   },
   outbound: {
-    base: {
-      deliveryMode: "direct",
-      resolveTarget(params) {
-        return {
-          ok: true,
-          to: params.to ?? DEFAULT_ACCOUNT_ID,
-        };
-      },
+    deliveryMode: "direct",
+    resolveTarget(params) {
+      return {
+        ok: true,
+        to: params.to ?? DEFAULT_ACCOUNT_ID,
+      };
     },
-    attachedResults: {
-      channel: CHANNEL_ID,
-      async sendText(ctx) {
-        const text = ctx.text ?? "";
-        log(`[schejo] outbound: ${text}`);
+    async sendText(ctx) {
+      const text = ctx.text ?? "";
+      logWithContext(ctx, `[schejo] outbound: ${text}`);
 
-        if (!runtimeState) {
-          log("[schejo] reply_post_failed: runtime is not paired");
-          return { messageId: `schejo-${randomUUID()}` };
-        }
+      if (!runtimeState) {
+        logWithContext(ctx, "[schejo] reply_post_failed: runtime is not paired");
+        const result: SchejoSendResult = {
+          ok: false,
+          error: "runtime is not paired",
+          retryable: false,
+        };
+        return toOutboundDeliveryResult(result);
+      }
 
-        try {
-          await postJson(endpoint(runtimeState.cloudUrl, "/v1/openclaw-reply"), {
-            openclaw_user_id: runtimeState.openclawUserId,
-            reply_text: text,
-          });
-        } catch (error) {
-          log(`[schejo] reply_post_failed: ${formatError(error)}`);
-        }
+      try {
+        await postJson(endpoint(runtimeState.cloudUrl, "/v1/openclaw-reply"), {
+          openclaw_user_id: runtimeState.openclawUserId,
+          reply_text: text,
+        });
+      } catch (error) {
+        const message = `POST /v1/openclaw-reply: ${formatError(error)}`;
+        logWithContext(ctx, `[schejo] reply_post_failed: ${message}`);
+        const result: SchejoSendResult = {
+          ok: false,
+          error: message,
+          retryable: false,
+        };
+        return toOutboundDeliveryResult(result);
+      }
 
-        return { messageId: `schejo-${randomUUID()}` };
-      },
+      const result: SchejoSendResult = {
+        ok: true,
+        messageId: `schejo-${randomUUID()}`,
+      };
+      return toOutboundDeliveryResult(result);
     },
   },
 });
@@ -395,6 +476,11 @@ async function pairWithCloud(api: OpenClawPluginApi): Promise<void> {
   }
 
   const cloudUrl = resolveCloudUrl(api);
+  if (!cloudUrl) {
+    log("[schejo] FATAL: SCHEJO_CLOUD_URL not set");
+    return;
+  }
+
   const openclawUserId = resolveOpenClawUserId(api);
 
   try {
