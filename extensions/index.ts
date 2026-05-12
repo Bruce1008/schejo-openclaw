@@ -17,6 +17,8 @@ import type { OutboundReplyPayload } from "openclaw/plugin-sdk/reply-payload";
 const CHANNEL_ID = "schejo";
 const DEFAULT_ACCOUNT_ID = "ios";
 const THIN_SLICE_SKILL_PREFIX = "请使用schejo skill,";
+const THIN_SLICE_REPLY_PREFIX = "spike-ack:";
+const THIN_SLICE_FALLBACK_DELAY_MS = 1500;
 
 type JsonRecord = Record<string, unknown>;
 type SchejoSendResult = ChannelSendRawResult;
@@ -203,6 +205,10 @@ function resolveThinSliceFallbackReply(body: string): string | undefined {
   return body.startsWith(THIN_SLICE_SKILL_PREFIX) ? `spike-ack: ${body}` : undefined;
 }
 
+function isAllowedThinSliceReply(text: string): boolean {
+  return text.trimStart().startsWith(THIN_SLICE_REPLY_PREFIX);
+}
+
 async function postJson(url: string, body: JsonRecord): Promise<void> {
   const response = await fetch(url, {
     method: "POST",
@@ -231,6 +237,11 @@ async function postReplyToCloud(text: string): Promise<void> {
 }
 
 async function deliverReplyText(ctx: object, text: string): Promise<void> {
+  if (!isAllowedThinSliceReply(text)) {
+    logWithContext(ctx, "[schejo] outbound_blocked: non thin-slice reply");
+    throw new Error("non thin-slice outbound blocked");
+  }
+
   logWithContext(ctx, `[schejo] outbound: ${text}`);
 
   try {
@@ -358,39 +369,68 @@ async function handleInboundEvent(ctx: SchejoGatewayContext, event: SchejoSseEve
       : Date.now();
 
   let delivered = false;
-  await dispatchInboundDirectDmWithRuntime({
-    cfg: ctx.cfg,
-    runtime,
-    channel: CHANNEL_ID,
-    channelLabel: "Schejo",
-    accountId: ctx.accountId,
-    peer: {
-      kind: "direct",
-      id: DEFAULT_ACCOUNT_ID,
-    },
-    senderId: DEFAULT_ACCOUNT_ID,
-    senderAddress: "schejo-ios",
-    recipientAddress: "openclaw",
-    conversationLabel: "Schejo iOS",
-    rawBody: body,
-    messageId,
-    timestamp,
-    commandAuthorized: true,
-    provider: CHANNEL_ID,
-    surface: CHANNEL_ID,
-    deliver: async (payload) => {
-      delivered = true;
-      await deliverReplyPayload(ctx, payload);
-    },
-    onRecordError: (error) => {
-      logWithContext(ctx, `[schejo] inbound_record_error: ${formatError(error)}`);
-    },
-    onDispatchError: (error, info) => {
-      logWithContext(ctx, `[schejo] inbound_dispatch_error: ${info.kind}: ${formatError(error)}`);
-    },
-  });
+  let fallbackSent = false;
+  let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
 
-  if (!delivered && fallbackReply) {
+  if (fallbackReply) {
+    fallbackTimer = setTimeout(() => {
+      if (delivered || fallbackSent) {
+        return;
+      }
+
+      fallbackSent = true;
+      logWithContext(ctx, "[schejo] fallback_outbound: no agent reply delivered");
+      void deliverReplyText(ctx, fallbackReply).catch((error) => {
+        logWithContext(ctx, `[schejo] fallback_failed: ${formatError(error)}`);
+      });
+    }, THIN_SLICE_FALLBACK_DELAY_MS);
+  }
+
+  try {
+    await dispatchInboundDirectDmWithRuntime({
+      cfg: ctx.cfg,
+      runtime,
+      channel: CHANNEL_ID,
+      channelLabel: "Schejo",
+      accountId: ctx.accountId,
+      peer: {
+        kind: "direct",
+        id: DEFAULT_ACCOUNT_ID,
+      },
+      senderId: DEFAULT_ACCOUNT_ID,
+      senderAddress: "schejo-ios",
+      recipientAddress: "openclaw",
+      conversationLabel: "Schejo iOS",
+      rawBody: body,
+      messageId,
+      timestamp,
+      commandAuthorized: true,
+      provider: CHANNEL_ID,
+      surface: CHANNEL_ID,
+      deliver: async (payload) => {
+        if (fallbackSent) {
+          logWithContext(ctx, "[schejo] outbound_blocked: fallback already sent");
+          return;
+        }
+
+        await deliverReplyPayload(ctx, payload);
+        delivered = true;
+      },
+      onRecordError: (error) => {
+        logWithContext(ctx, `[schejo] inbound_record_error: ${formatError(error)}`);
+      },
+      onDispatchError: (error, info) => {
+        logWithContext(ctx, `[schejo] inbound_dispatch_error: ${info.kind}: ${formatError(error)}`);
+      },
+    });
+  } finally {
+    if (fallbackTimer) {
+      clearTimeout(fallbackTimer);
+    }
+  }
+
+  if (!delivered && !fallbackSent && fallbackReply) {
+    fallbackSent = true;
     logWithContext(ctx, "[schejo] fallback_outbound: no agent reply delivered");
     await deliverReplyText(ctx, fallbackReply);
   }
