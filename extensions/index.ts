@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { dispatchInboundDirectDmWithRuntime } from "openclaw/plugin-sdk/direct-dm";
 import {
   createChannelPluginBase,
   createChatChannelPlugin,
@@ -6,10 +7,12 @@ import {
   type OpenClawConfig,
   type OpenClawPluginApi,
 } from "openclaw/plugin-sdk/channel-core";
+import type { ChannelGatewayContext } from "openclaw/plugin-sdk/channel-contract";
 import {
   createRawChannelSendResultAdapter,
   type ChannelSendRawResult,
 } from "openclaw/plugin-sdk/channel-send-result";
+import type { OutboundReplyPayload } from "openclaw/plugin-sdk/reply-payload";
 
 const CHANNEL_ID = "schejo";
 const DEFAULT_ACCOUNT_ID = "ios";
@@ -32,9 +35,13 @@ type SchejoRuntimeState = {
 
 type SchejoSseEvent = {
   body?: unknown;
+  id?: unknown;
+  timestamp?: unknown;
 };
 
 type SchejoChatChannelParams = Parameters<typeof createChatChannelPlugin<SchejoAccount>>[0];
+type SchejoGatewayContext = ChannelGatewayContext<SchejoAccount>;
+type SchejoDirectDmRuntime = Parameters<typeof dispatchInboundDirectDmWithRuntime>[0]["runtime"];
 
 let runtimeState: SchejoRuntimeState | null = null;
 let confirmedPairKey: string | null = null;
@@ -207,6 +214,42 @@ async function postJson(url: string, body: JsonRecord): Promise<void> {
   }
 }
 
+async function postReplyToCloud(text: string): Promise<void> {
+  if (!runtimeState) {
+    throw new Error("runtime is not paired");
+  }
+
+  await postJson(endpoint(runtimeState.cloudUrl, "/v1/openclaw-reply"), {
+    openclaw_user_id: runtimeState.openclawUserId,
+    reply_text: text,
+  });
+}
+
+async function deliverReplyText(ctx: object, text: string): Promise<void> {
+  logWithContext(ctx, `[schejo] outbound: ${text}`);
+
+  try {
+    await postReplyToCloud(text);
+  } catch (error) {
+    const message = `POST /v1/openclaw-reply: ${formatError(error)}`;
+    logWithContext(ctx, `[schejo] reply_post_failed: ${message}; not retrying`);
+    throw new Error(message);
+  }
+}
+
+async function deliverReplyPayload(
+  ctx: SchejoGatewayContext,
+  payload: OutboundReplyPayload,
+): Promise<void> {
+  const text = readString(payload.text);
+  if (!text) {
+    logWithContext(ctx, "[schejo] outbound_empty: no text payload");
+    return;
+  }
+
+  await deliverReplyText(ctx, text);
+}
+
 function wait(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve();
 
@@ -236,7 +279,7 @@ function parseSseData(frame: string): string | undefined {
 async function readSseStream(params: {
   response: Response;
   signal: AbortSignal;
-  onEvent: (event: SchejoSseEvent) => void;
+  onEvent: (event: SchejoSseEvent) => Promise<void> | void;
 }): Promise<void> {
   if (!params.response.body) {
     throw new Error("SSE response body is empty");
@@ -263,9 +306,9 @@ async function readSseStream(params: {
         if (!data) continue;
 
         try {
-          params.onEvent(JSON.parse(data) as SchejoSseEvent);
+          await params.onEvent(JSON.parse(data) as SchejoSseEvent);
         } catch (error) {
-          log(`[schejo] inbound_error: invalid SSE data ${formatError(error)}`);
+          log(`[schejo] inbound_error: ${formatError(error)}`);
         }
       }
     }
@@ -274,17 +317,66 @@ async function readSseStream(params: {
   }
 }
 
-function handleInboundEvent(event: SchejoSseEvent): void {
+function resolveDirectDmRuntime(ctx: SchejoGatewayContext): SchejoDirectDmRuntime | undefined {
+  if (!ctx.channelRuntime) return undefined;
+  return {
+    channel: ctx.channelRuntime as unknown as SchejoDirectDmRuntime["channel"],
+  };
+}
+
+async function handleInboundEvent(ctx: SchejoGatewayContext, event: SchejoSseEvent): Promise<void> {
   const body = readString(event.body);
   if (!body) {
-    log("[schejo] inbound_error: missing body");
+    logWithContext(ctx, "[schejo] inbound_error: missing body");
     return;
   }
 
-  log(`[schejo] inbound: ${body}`);
+  logWithContext(ctx, `[schejo] inbound: ${body}`);
+
+  const runtime = resolveDirectDmRuntime(ctx);
+  if (!runtime) {
+    logWithContext(ctx, "[schejo] inbound_error: channelRuntime not available");
+    return;
+  }
+
+  const messageId = readString(event.id) ?? `schejo-in-${randomUUID()}`;
+  const timestamp =
+    typeof event.timestamp === "number" && Number.isFinite(event.timestamp)
+      ? event.timestamp
+      : Date.now();
+
+  await dispatchInboundDirectDmWithRuntime({
+    cfg: ctx.cfg,
+    runtime,
+    channel: CHANNEL_ID,
+    channelLabel: "Schejo",
+    accountId: ctx.accountId,
+    peer: {
+      kind: "direct",
+      id: DEFAULT_ACCOUNT_ID,
+    },
+    senderId: DEFAULT_ACCOUNT_ID,
+    senderAddress: "schejo-ios",
+    recipientAddress: "openclaw",
+    conversationLabel: "Schejo iOS",
+    rawBody: body,
+    messageId,
+    timestamp,
+    commandAuthorized: true,
+    provider: CHANNEL_ID,
+    surface: CHANNEL_ID,
+    deliver: (payload) => deliverReplyPayload(ctx, payload),
+    onRecordError: (error) => {
+      logWithContext(ctx, `[schejo] inbound_record_error: ${formatError(error)}`);
+    },
+    onDispatchError: (error, info) => {
+      logWithContext(ctx, `[schejo] inbound_dispatch_error: ${info.kind}: ${formatError(error)}`);
+    },
+  });
 }
 
 async function runSseLoop(params: {
+  ctx: SchejoGatewayContext;
   cloudUrl: string;
   openclawUserId: string;
   signal: AbortSignal;
@@ -312,7 +404,7 @@ async function runSseLoop(params: {
       await readSseStream({
         response,
         signal: params.signal,
-        onEvent: handleInboundEvent,
+        onEvent: (event) => handleInboundEvent(params.ctx, event),
       });
 
       if (!params.signal.aborted) {
@@ -500,6 +592,7 @@ const schejoChannelBase = {
       await pairWithConfig(ctx.cfg);
       if (runtimeState) {
         await runSseLoop({
+          ctx,
           cloudUrl: runtimeState.cloudUrl,
           openclawUserId: runtimeState.openclawUserId,
           signal: ctx.abortSignal,
@@ -532,7 +625,6 @@ export const schejoChannelPlugin = createChatChannelPlugin<SchejoAccount>({
       channel: CHANNEL_ID,
       async sendText(ctx) {
         const text = ctx.text ?? "";
-        logWithContext(ctx, `[schejo] outbound: ${text}`);
 
         if (!runtimeState) {
           logWithContext(ctx, "[schejo] reply_post_failed: runtime is not paired; not retrying");
@@ -544,16 +636,11 @@ export const schejoChannelPlugin = createChatChannelPlugin<SchejoAccount>({
         }
 
         try {
-          await postJson(endpoint(runtimeState.cloudUrl, "/v1/openclaw-reply"), {
-            openclaw_user_id: runtimeState.openclawUserId,
-            reply_text: text,
-          });
+          await deliverReplyText(ctx, text);
         } catch (error) {
-          const message = `POST /v1/openclaw-reply: ${formatError(error)}`;
-          logWithContext(ctx, `[schejo] reply_post_failed: ${message}; not retrying`);
           const result: SchejoSendResult = {
             ok: false,
-            error: message,
+            error: formatError(error),
           };
           return result;
         }

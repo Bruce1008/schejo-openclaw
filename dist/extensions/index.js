@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { dispatchInboundDirectDmWithRuntime } from "openclaw/plugin-sdk/direct-dm";
 import { createChannelPluginBase, createChatChannelPlugin, defineChannelPluginEntry, } from "openclaw/plugin-sdk/channel-core";
 import { createRawChannelSendResultAdapter, } from "openclaw/plugin-sdk/channel-send-result";
 const CHANNEL_ID = "schejo";
@@ -120,6 +121,34 @@ async function postJson(url, body) {
         throw new Error(`HTTP ${response.status}${detail}`);
     }
 }
+async function postReplyToCloud(text) {
+    if (!runtimeState) {
+        throw new Error("runtime is not paired");
+    }
+    await postJson(endpoint(runtimeState.cloudUrl, "/v1/openclaw-reply"), {
+        openclaw_user_id: runtimeState.openclawUserId,
+        reply_text: text,
+    });
+}
+async function deliverReplyText(ctx, text) {
+    logWithContext(ctx, `[schejo] outbound: ${text}`);
+    try {
+        await postReplyToCloud(text);
+    }
+    catch (error) {
+        const message = `POST /v1/openclaw-reply: ${formatError(error)}`;
+        logWithContext(ctx, `[schejo] reply_post_failed: ${message}; not retrying`);
+        throw new Error(message);
+    }
+}
+async function deliverReplyPayload(ctx, payload) {
+    const text = readString(payload.text);
+    if (!text) {
+        logWithContext(ctx, "[schejo] outbound_empty: no text payload");
+        return;
+    }
+    await deliverReplyText(ctx, text);
+}
 function wait(ms, signal) {
     if (signal.aborted)
         return Promise.resolve();
@@ -163,10 +192,10 @@ async function readSseStream(params) {
                 if (!data)
                     continue;
                 try {
-                    params.onEvent(JSON.parse(data));
+                    await params.onEvent(JSON.parse(data));
                 }
                 catch (error) {
-                    log(`[schejo] inbound_error: invalid SSE data ${formatError(error)}`);
+                    log(`[schejo] inbound_error: ${formatError(error)}`);
                 }
             }
         }
@@ -175,13 +204,57 @@ async function readSseStream(params) {
         reader.releaseLock();
     }
 }
-function handleInboundEvent(event) {
+function resolveDirectDmRuntime(ctx) {
+    if (!ctx.channelRuntime)
+        return undefined;
+    return {
+        channel: ctx.channelRuntime,
+    };
+}
+async function handleInboundEvent(ctx, event) {
     const body = readString(event.body);
     if (!body) {
-        log("[schejo] inbound_error: missing body");
+        logWithContext(ctx, "[schejo] inbound_error: missing body");
         return;
     }
-    log(`[schejo] inbound: ${body}`);
+    logWithContext(ctx, `[schejo] inbound: ${body}`);
+    const runtime = resolveDirectDmRuntime(ctx);
+    if (!runtime) {
+        logWithContext(ctx, "[schejo] inbound_error: channelRuntime not available");
+        return;
+    }
+    const messageId = readString(event.id) ?? `schejo-in-${randomUUID()}`;
+    const timestamp = typeof event.timestamp === "number" && Number.isFinite(event.timestamp)
+        ? event.timestamp
+        : Date.now();
+    await dispatchInboundDirectDmWithRuntime({
+        cfg: ctx.cfg,
+        runtime,
+        channel: CHANNEL_ID,
+        channelLabel: "Schejo",
+        accountId: ctx.accountId,
+        peer: {
+            kind: "direct",
+            id: DEFAULT_ACCOUNT_ID,
+        },
+        senderId: DEFAULT_ACCOUNT_ID,
+        senderAddress: "schejo-ios",
+        recipientAddress: "openclaw",
+        conversationLabel: "Schejo iOS",
+        rawBody: body,
+        messageId,
+        timestamp,
+        commandAuthorized: true,
+        provider: CHANNEL_ID,
+        surface: CHANNEL_ID,
+        deliver: (payload) => deliverReplyPayload(ctx, payload),
+        onRecordError: (error) => {
+            logWithContext(ctx, `[schejo] inbound_record_error: ${formatError(error)}`);
+        },
+        onDispatchError: (error, info) => {
+            logWithContext(ctx, `[schejo] inbound_dispatch_error: ${info.kind}: ${formatError(error)}`);
+        },
+    });
 }
 async function runSseLoop(params) {
     while (!params.signal.aborted) {
@@ -201,7 +274,7 @@ async function runSseLoop(params) {
             await readSseStream({
                 response,
                 signal: params.signal,
-                onEvent: handleInboundEvent,
+                onEvent: (event) => handleInboundEvent(params.ctx, event),
             });
             if (!params.signal.aborted) {
                 log("[schejo] sse_disconnected");
@@ -371,6 +444,7 @@ const schejoChannelBase = {
             await pairWithConfig(ctx.cfg);
             if (runtimeState) {
                 await runSseLoop({
+                    ctx,
                     cloudUrl: runtimeState.cloudUrl,
                     openclawUserId: runtimeState.openclawUserId,
                     signal: ctx.abortSignal,
@@ -403,7 +477,6 @@ export const schejoChannelPlugin = createChatChannelPlugin({
             channel: CHANNEL_ID,
             async sendText(ctx) {
                 const text = ctx.text ?? "";
-                logWithContext(ctx, `[schejo] outbound: ${text}`);
                 if (!runtimeState) {
                     logWithContext(ctx, "[schejo] reply_post_failed: runtime is not paired; not retrying");
                     const result = {
@@ -413,17 +486,12 @@ export const schejoChannelPlugin = createChatChannelPlugin({
                     return result;
                 }
                 try {
-                    await postJson(endpoint(runtimeState.cloudUrl, "/v1/openclaw-reply"), {
-                        openclaw_user_id: runtimeState.openclawUserId,
-                        reply_text: text,
-                    });
+                    await deliverReplyText(ctx, text);
                 }
                 catch (error) {
-                    const message = `POST /v1/openclaw-reply: ${formatError(error)}`;
-                    logWithContext(ctx, `[schejo] reply_post_failed: ${message}; not retrying`);
                     const result = {
                         ok: false,
-                        error: message,
+                        error: formatError(error),
                     };
                     return result;
                 }
