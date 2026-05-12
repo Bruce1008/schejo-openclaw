@@ -2,7 +2,7 @@
   "id": "schejo",
   "name": "Schejo",
   "description": "Schejo iOS app channel for OpenClaw thin-slice pairing.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "activation": {
     "onStartup": true
   },

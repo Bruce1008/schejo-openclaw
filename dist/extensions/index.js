@@ -4,6 +4,7 @@ import { createChannelPluginBase, createChatChannelPlugin, defineChannelPluginEn
 import { createRawChannelSendResultAdapter, } from "openclaw/plugin-sdk/channel-send-result";
 const CHANNEL_ID = "schejo";
 const DEFAULT_ACCOUNT_ID = "ios";
+const THIN_SLICE_SKILL_PREFIX = "请使用schejo skill,";
 let runtimeState = null;
 let confirmedPairKey = null;
 function log(message) {
@@ -106,6 +107,9 @@ function formatError(error) {
     if (error instanceof Error)
         return error.message;
     return String(error);
+}
+function resolveThinSliceFallbackReply(body) {
+    return body.startsWith(THIN_SLICE_SKILL_PREFIX) ? `spike-ack: ${body}` : undefined;
 }
 async function postJson(url, body) {
     const response = await fetch(url, {
@@ -218,8 +222,14 @@ async function handleInboundEvent(ctx, event) {
         return;
     }
     logWithContext(ctx, `[schejo] inbound: ${body}`);
+    const fallbackReply = resolveThinSliceFallbackReply(body);
     const runtime = resolveDirectDmRuntime(ctx);
     if (!runtime) {
+        if (fallbackReply) {
+            logWithContext(ctx, "[schejo] fallback_outbound: channelRuntime not available");
+            await deliverReplyText(ctx, fallbackReply);
+            return;
+        }
         logWithContext(ctx, "[schejo] inbound_error: channelRuntime not available");
         return;
     }
@@ -227,6 +237,7 @@ async function handleInboundEvent(ctx, event) {
     const timestamp = typeof event.timestamp === "number" && Number.isFinite(event.timestamp)
         ? event.timestamp
         : Date.now();
+    let delivered = false;
     await dispatchInboundDirectDmWithRuntime({
         cfg: ctx.cfg,
         runtime,
@@ -247,7 +258,10 @@ async function handleInboundEvent(ctx, event) {
         commandAuthorized: true,
         provider: CHANNEL_ID,
         surface: CHANNEL_ID,
-        deliver: (payload) => deliverReplyPayload(ctx, payload),
+        deliver: async (payload) => {
+            delivered = true;
+            await deliverReplyPayload(ctx, payload);
+        },
         onRecordError: (error) => {
             logWithContext(ctx, `[schejo] inbound_record_error: ${formatError(error)}`);
         },
@@ -255,6 +269,10 @@ async function handleInboundEvent(ctx, event) {
             logWithContext(ctx, `[schejo] inbound_dispatch_error: ${info.kind}: ${formatError(error)}`);
         },
     });
+    if (!delivered && fallbackReply) {
+        logWithContext(ctx, "[schejo] fallback_outbound: no agent reply delivered");
+        await deliverReplyText(ctx, fallbackReply);
+    }
 }
 async function runSseLoop(params) {
     while (!params.signal.aborted) {
