@@ -78,6 +78,10 @@ function asRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
 }
 
+function isRecord(value: unknown): value is JsonRecord {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function readString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
@@ -216,6 +220,86 @@ function formatError(error: unknown): string {
   return String(error);
 }
 
+function clip(text: string, maxLength = 500): string {
+  return text.length > maxLength ? text.slice(0, maxLength) : text;
+}
+
+function extractJsonCodeBlock(raw: string): string | undefined {
+  const match = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  return match?.[1]?.trim();
+}
+
+function extractBalancedJsonObjects(raw: string): string[] {
+  const candidates: string[] = [];
+  for (let start = raw.indexOf("{"); start !== -1; start = raw.indexOf("{", start + 1)) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let idx = start; idx < raw.length; idx += 1) {
+      const ch = raw[idx];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === "\\") {
+          escaped = true;
+        } else if (ch === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === "\"") {
+        inString = true;
+      } else if (ch === "{") {
+        depth += 1;
+      } else if (ch === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          candidates.push(raw.slice(start, idx + 1).trim());
+          break;
+        }
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function extractDailyReportJsonCandidates(raw: string): string[] {
+  const fenced = extractJsonCodeBlock(raw);
+  if (fenced) return [fenced];
+
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) return [trimmed];
+
+  return extractBalancedJsonObjects(raw);
+}
+
+function parseDailyReport(raw: string): { ok: true; report: JsonRecord } | { ok: false; error: string } {
+  const candidates = extractDailyReportJsonCandidates(raw);
+  if (candidates.length === 0) {
+    return { ok: false, error: `no json object in raw=${clip(raw)}` };
+  }
+
+  let lastError = "unknown parse error";
+  for (const jsonText of candidates) {
+    try {
+      const parsed: unknown = JSON.parse(jsonText);
+      if (!isRecord(parsed)) {
+        lastError = "daily report JSON must be an object";
+        continue;
+      }
+      return { ok: true, report: parsed };
+    } catch (error) {
+      lastError = formatError(error);
+    }
+  }
+
+  return { ok: false, error: `parse: ${lastError}` };
+}
+
 function resolveThinSliceFallbackReply(body: string): string | undefined {
   const acceptsThinSlicePing =
     body.startsWith(SCHEJO_SKILL_PREFIX) ||
@@ -277,6 +361,14 @@ async function postReplyToCloud(text: string): Promise<void> {
   });
 }
 
+async function postHealthReportToCloud(body: JsonRecord): Promise<void> {
+  if (!runtimeState) {
+    throw new Error("runtime is not paired");
+  }
+
+  await postJson(endpoint(runtimeState.cloudUrl, "/v1/health/report"), body);
+}
+
 async function deliverReplyText(ctx: object, text: string): Promise<void> {
   if (!isAllowedThinSliceReply(text)) {
     logWithContext(ctx, "[schejo] outbound_blocked: non thin-slice reply");
@@ -327,6 +419,37 @@ async function deliverDailyReportReplyPayload(
     ctx,
     `[schejo] outbound raw request_id=${requestId} len=${Buffer.byteLength(text)}`,
   );
+
+  const parsed = parseDailyReport(text);
+  const statusBody: JsonRecord = parsed.ok
+    ? {
+        request_id: requestId,
+        status: "ready",
+        report_json: parsed.report,
+      }
+    : {
+        request_id: requestId,
+        status: "failed",
+        error_message: parsed.error,
+      };
+
+  if (!parsed.ok) {
+    logWithContext(ctx, `[schejo] report_parse_failed request_id=${requestId}: ${parsed.error}`);
+  }
+
+  try {
+    await postHealthReportToCloud(statusBody);
+    pendingDailyReports.delete(requestId);
+    logWithContext(
+      ctx,
+      `[schejo] report_posted request_id=${requestId} status=${statusBody.status}`,
+    );
+  } catch (error) {
+    logWithContext(
+      ctx,
+      `[schejo] report_post_failed request_id=${requestId} status=${statusBody.status}: ${formatError(error)}`,
+    );
+  }
 }
 
 function wait(ms: number, signal: AbortSignal): Promise<void> {
