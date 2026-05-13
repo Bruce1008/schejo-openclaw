@@ -16,9 +16,13 @@ import type { OutboundReplyPayload } from "openclaw/plugin-sdk/reply-payload";
 
 const CHANNEL_ID = "schejo";
 const DEFAULT_ACCOUNT_ID = "ios";
-const THIN_SLICE_SKILL_PREFIX = "请使用schejo skill,";
+const SCHEJO_SKILL_PREFIX = "使用schejo skill。";
+const SCHEJO_SKILL_PREFIX_WITH_SPACE = "使用schejo skill 。";
+const LEGACY_THIN_SLICE_SKILL_PREFIX = "请使用schejo skill,";
 const THIN_SLICE_REPLY_PREFIX = "spike-ack:";
 const THIN_SLICE_FALLBACK_DELAY_MS = 1500;
+const DAILY_REPORT_PROMPT_PREFIX = `${SCHEJO_SKILL_PREFIX}请生成今日健康报告`;
+const DAILY_REPORT_PENDING_TTL_MS = 5 * 60 * 1000;
 
 type JsonRecord = Record<string, unknown>;
 type SchejoSendResult = ChannelSendRawResult;
@@ -36,9 +40,19 @@ type SchejoRuntimeState = {
   openclawUserId: string;
 };
 
+type PendingDailyReportRequest = {
+  requestId: string;
+  summary: JsonRecord;
+  createdAt: number;
+  rawOutput?: string;
+};
+
 type SchejoSseEvent = {
+  type?: unknown;
   body?: unknown;
   id?: unknown;
+  request_id?: unknown;
+  summary?: unknown;
   timestamp?: unknown;
 };
 
@@ -48,6 +62,7 @@ type SchejoDirectDmRuntime = Parameters<typeof dispatchInboundDirectDmWithRuntim
 
 let runtimeState: SchejoRuntimeState | null = null;
 let confirmedPairKey: string | null = null;
+const pendingDailyReports = new Map<string, PendingDailyReportRequest>();
 
 function log(message: string): void {
   console.error(message);
@@ -60,7 +75,7 @@ function logWithContext(input: object, message: string): void {
 }
 
 function asRecord(value: unknown): JsonRecord {
-  return value && typeof value === "object" ? (value as JsonRecord) : {};
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
 }
 
 function readString(value: unknown): string | undefined {
@@ -202,11 +217,37 @@ function formatError(error: unknown): string {
 }
 
 function resolveThinSliceFallbackReply(body: string): string | undefined {
-  return body.startsWith(THIN_SLICE_SKILL_PREFIX) ? `spike-ack: ${body}` : undefined;
+  const acceptsThinSlicePing =
+    body.startsWith(SCHEJO_SKILL_PREFIX) ||
+    body.startsWith(SCHEJO_SKILL_PREFIX_WITH_SPACE) ||
+    body.startsWith(LEGACY_THIN_SLICE_SKILL_PREFIX);
+  return acceptsThinSlicePing ? `spike-ack: ${body}` : undefined;
 }
 
 function isAllowedThinSliceReply(text: string): boolean {
   return text.trimStart().startsWith(THIN_SLICE_REPLY_PREFIX);
+}
+
+function cleanupPendingDailyReports(): void {
+  const now = Date.now();
+  for (const [requestId, entry] of pendingDailyReports.entries()) {
+    if (now - entry.createdAt > DAILY_REPORT_PENDING_TTL_MS) {
+      pendingDailyReports.delete(requestId);
+      log(`[schejo] daily_report_pending_cleanup request_id=${requestId}`);
+    }
+  }
+}
+
+function buildDailyReportPrompt(requestId: string, summary: JsonRecord): string {
+  return [
+    DAILY_REPORT_PROMPT_PREFIX,
+    "",
+    `request_id: ${requestId}`,
+    "",
+    "[HEALTH_SUMMARY_JSON]",
+    JSON.stringify(summary),
+    "[/HEALTH_SUMMARY_JSON]",
+  ].join("\n");
 }
 
 async function postJson(url: string, body: JsonRecord): Promise<void> {
@@ -264,6 +305,28 @@ async function deliverReplyPayload(
   }
 
   await deliverReplyText(ctx, text);
+}
+
+async function deliverDailyReportReplyPayload(
+  ctx: SchejoGatewayContext,
+  requestId: string,
+  payload: OutboundReplyPayload,
+): Promise<void> {
+  const text = readString(payload.text);
+  if (!text) {
+    logWithContext(ctx, `[schejo] outbound_empty request_id=${requestId}: no text payload`);
+    return;
+  }
+
+  const pending = pendingDailyReports.get(requestId);
+  if (pending) {
+    pending.rawOutput = text;
+  }
+
+  logWithContext(
+    ctx,
+    `[schejo] outbound raw request_id=${requestId} len=${Buffer.byteLength(text)}`,
+  );
 }
 
 function wait(ms: number, signal: AbortSignal): Promise<void> {
@@ -340,14 +403,116 @@ function resolveDirectDmRuntime(ctx: SchejoGatewayContext): SchejoDirectDmRuntim
   };
 }
 
+async function dispatchDailyReportRequest(
+  ctx: SchejoGatewayContext,
+  requestId: string,
+  summary: JsonRecord,
+): Promise<void> {
+  const runtime = resolveDirectDmRuntime(ctx);
+  if (!runtime) {
+    logWithContext(
+      ctx,
+      `[schejo] inbound_error: channelRuntime not available request_id=${requestId}`,
+    );
+    return;
+  }
+
+  cleanupPendingDailyReports();
+  pendingDailyReports.set(requestId, {
+    requestId,
+    summary,
+    createdAt: Date.now(),
+  });
+
+  let delivered = false;
+  const rawBody = buildDailyReportPrompt(requestId, summary);
+
+  await dispatchInboundDirectDmWithRuntime({
+    cfg: ctx.cfg,
+    runtime,
+    channel: CHANNEL_ID,
+    channelLabel: "Schejo",
+    accountId: ctx.accountId,
+    peer: {
+      kind: "direct",
+      id: DEFAULT_ACCOUNT_ID,
+    },
+    senderId: DEFAULT_ACCOUNT_ID,
+    senderAddress: "schejo-ios",
+    recipientAddress: "openclaw",
+    conversationLabel: "Schejo iOS Daily Report",
+    rawBody,
+    messageId: `schejo-report-${requestId}`,
+    timestamp: Date.now(),
+    commandAuthorized: true,
+    provider: CHANNEL_ID,
+    surface: CHANNEL_ID,
+    extraContext: {
+      schejo_request_id: requestId,
+      schejo_event_type: "daily_report_request",
+    },
+    deliver: async (payload) => {
+      await deliverDailyReportReplyPayload(ctx, requestId, payload);
+      delivered = true;
+    },
+    onRecordError: (error) => {
+      logWithContext(ctx, `[schejo] daily_report_record_error request_id=${requestId}: ${formatError(error)}`);
+    },
+    onDispatchError: (error, info) => {
+      logWithContext(
+        ctx,
+        `[schejo] daily_report_dispatch_error request_id=${requestId} ${info.kind}: ${formatError(error)}`,
+      );
+    },
+  });
+
+  if (!delivered) {
+    logWithContext(ctx, `[schejo] outbound_missing request_id=${requestId}`);
+  }
+}
+
 async function handleInboundEvent(ctx: SchejoGatewayContext, event: SchejoSseEvent): Promise<void> {
+  const type = readString(event.type) ?? "ping";
+
+  if (type === "daily_report_request") {
+    const requestId = readString(event.request_id);
+    const summary = asRecord(event.summary);
+
+    if (!requestId) {
+      logWithContext(ctx, "[schejo] inbound_error: daily_report_request missing request_id");
+      return;
+    }
+
+    if (Object.keys(summary).length === 0) {
+      logWithContext(
+        ctx,
+        `[schejo] inbound_error: daily_report_request missing summary request_id=${requestId}`,
+      );
+      return;
+    }
+
+    logWithContext(
+      ctx,
+      `[schejo] inbound type=daily_report_request request_id=${requestId} summary_bytes=${Buffer.byteLength(
+        JSON.stringify(summary),
+      )}`,
+    );
+    await dispatchDailyReportRequest(ctx, requestId, summary);
+    return;
+  }
+
+  if (type !== "ping") {
+    logWithContext(ctx, `[schejo] inbound_error: unknown type=${type}`);
+    return;
+  }
+
   const body = readString(event.body);
   if (!body) {
     logWithContext(ctx, "[schejo] inbound_error: missing body");
     return;
   }
 
-  logWithContext(ctx, `[schejo] inbound: ${body}`);
+  logWithContext(ctx, `[schejo] inbound type=ping body=${body}`);
 
   const fallbackReply = resolveThinSliceFallbackReply(body);
   const runtime = resolveDirectDmRuntime(ctx);
@@ -413,8 +578,16 @@ async function handleInboundEvent(ctx: SchejoGatewayContext, event: SchejoSseEve
           return;
         }
 
-        await deliverReplyPayload(ctx, payload);
-        delivered = true;
+        try {
+          await deliverReplyPayload(ctx, payload);
+          delivered = true;
+        } catch (error) {
+          if (fallbackReply) {
+            logWithContext(ctx, `[schejo] outbound_ignored_for_fallback: ${formatError(error)}`);
+            return;
+          }
+          throw error;
+        }
       },
       onRecordError: (error) => {
         logWithContext(ctx, `[schejo] inbound_record_error: ${formatError(error)}`);

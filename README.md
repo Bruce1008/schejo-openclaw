@@ -6,7 +6,7 @@ This repository contains the public OpenClaw side of the Schejo thin-slice MVP:
 - plugin runtime entry: `dist/extensions/index.js`
 - skill instructions: `skills/schejo/SKILL.md`
 - cloud relay default: `http://111.230.239.136/schejo`
-- current plugin version: `0.1.1`
+- current plugin version: `0.1.5`
 
 ## Install Prompt Template
 
