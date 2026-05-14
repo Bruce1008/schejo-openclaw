@@ -222,7 +222,7 @@ function buildDailyReportPrompt(requestId, summary) {
         "- 严重缺数据才固定 score=50：sleep.total_in_bed_min < 60、steps < 100，或心率/HRV/静息心率全无。",
         "- hr_sample_count < 100 但睡眠、活动、HRV/静息心率存在时不要固定 50；照评分表给分，但 score 最高 85。",
         "- steps 只能写“步”；distance_walk_run_m 才能写“米/公里”。",
-        "- 禁止建议佩戴设备、检查设备、保持监测连续性；禁止推测设备、压力、疲劳、疼痛、饮食、训练目标。",
+        "- 禁止建议佩戴设备、检查设备、保持监测连续性；禁止推测设备、压力、疲劳、疼痛、饮食、训练目标、训练计划。",
         "- highlights 必须引用真实数字或明确阈值；suggestions 必须对应已有证据。",
         "- 只能输出 ```json 代码块，不要输出 JSON 外文字。",
         "",
