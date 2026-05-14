@@ -88,6 +88,8 @@ HealthSummary 顶层字段：
 - 如果数据缺失、为 null、样本数为 0 或明显不足，只能写"数据不完整"、"未同步到"或"无法判断"，不能把缺失数据当作好或坏。
 - `summary` 写总体结论；`highlights` 写有证据的事实观察，优先带一个真实数字；`suggestions` 只能针对已观察到的事实给保守建议。
 - 不确定时选择更保守的表述和分数。宁可少说，不要猜。
+- `steps` 的单位只能写"步"；`distance_walk_run_m` 的单位才是"米"或"公里"。禁止把步数写成米。
+- 禁止从 `hr_sample_count` 少推断设备佩戴、设备故障或用户行为；只能说"心率样本较少，心率区间判断有限"。
 
 ## 评分规则
 
@@ -109,7 +111,9 @@ HealthSummary 顶层字段：
 | 锻炼 | `exercise_minutes >= 90` | 额外 +5 |
 | 活跃 | `steps >= 10000` | +5 |
 
-如果 `hr_sample_count < 100`、`sleep.total_in_bed_min < 60` 或 `activity_24h.steps < 100`，视为数据不足：`score` 固定为 50，`summary` 必须以 `数据不完整` 开头。
+严重数据不足时：如果 `sleep.total_in_bed_min < 60`、`activity_24h.steps < 100`，或 (`hr_sample_count == 0` 且 `hrv_sample_count == 0` 且 `resting_bpm == null`)，`score` 固定为 50，`summary` 必须以 `数据不完整` 开头。
+
+单项可信度不足时：如果 `hr_sample_count < 100` 但睡眠、活动和至少一个心率/HRV指标存在，不要固定 50；照常按评分表计算，但最终 score 不超过 85。可以在 summary 或 highlights 里说"心率样本较少"，但不要建议佩戴设备。
 
 部分字段缺失时：
 
@@ -117,6 +121,8 @@ HealthSummary 顶层字段：
 - `hrv_sample_count == 0` 或 `hrv_sdnn_avg_ms` 为 null：HRV 不参与加减分，不能评价 HRV 好坏。
 - `sleep.stage_count == 0` 或 `total_in_bed_min < 60`：睡眠不参与正向评价，只能说明睡眠数据不足。
 - `workouts` 为空不代表没有运动；只根据 `exercise_minutes`、`steps`、`active_energy_kcal` 判断活动。
+- 只有当 `total_asleep_min >= 420` 且 `sleep_efficiency >= 0.85`，才能说睡眠恢复基础较好。
+- 只有当 `hrv_sdnn_avg_ms >= 30` 且 `resting_bpm <= 70`，才能说恢复信号尚可或稳定。
 
 ## 字段填写
 
@@ -141,5 +147,6 @@ HealthSummary 顶层字段：
 - 禁止编造 HealthSummary 没有的数据
 - 禁止把缺失数据说成正常、异常、达标或不达标
 - 禁止无依据推理，例如"压力大"、"疲劳"、"恢复良好"、"佩戴不足"，除非 HealthSummary 中有直接字段支持
+- 禁止建议佩戴设备、检查设备或保持监测连续性；这些属于设备行为推测，不是健康建议
 - 禁止提到 Apple Watch、HealthKit、OpenClaw、prompt、JSON、schema
 - 禁止输出不合法 JSON，禁止尾随逗号
