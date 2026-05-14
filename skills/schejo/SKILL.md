@@ -77,6 +77,7 @@ HealthSummary 顶层字段：
 - `score` 是 0 到 100 的整数
 - `summary` 是 1 句中文，不超过 80 个汉字
 - `key_metrics` 必须包含且只包含 7 个字段：`resting_hr_bpm`, `hrv_sdnn_ms`, `sleep_total_min`, `sleep_efficiency`, `steps`, `exercise_min`, `active_kcal`
+- `key_metrics` 里的 7 个值都必须是有限数字；缺失或无法判断时用 `0`，禁止使用 `null`、字符串或省略字段
 - `highlights` 2 到 4 条，每条不超过 30 个汉字
 - `suggestions` 1 到 3 条，每条不超过 30 个汉字
 
@@ -128,11 +129,11 @@ HealthSummary 顶层字段：
 
 - `resting_hr_bpm`: `heart_rate.resting_bpm` 四舍五入；如果为 null，用 `heart_rate.hr_p5` 四舍五入；仍为 null 时用 0
 - `hrv_sdnn_ms`: `heart_rate.hrv_sdnn_avg_ms` 四舍五入；null 时用 0
-- `sleep_total_min`: `sleep.total_asleep_min` 四舍五入
-- `sleep_efficiency`: `sleep.sleep_efficiency`，保留 2 位小数
-- `steps`: `activity_24h.steps`
-- `exercise_min`: `activity_24h.exercise_minutes` 四舍五入
-- `active_kcal`: `activity_24h.active_energy_kcal` 四舍五入
+- `sleep_total_min`: `sleep.total_asleep_min` 四舍五入；null 时用 0
+- `sleep_efficiency`: `sleep.sleep_efficiency`，保留 2 位小数；null 时用 0
+- `steps`: `activity_24h.steps`；null 时用 0
+- `exercise_min`: `activity_24h.exercise_minutes` 四舍五入；null 时用 0
+- `active_kcal`: `activity_24h.active_energy_kcal` 四舍五入；null 时用 0
 - `summary` 必须与 score 和主要证据一致；数据不足时必须以 `数据不完整` 开头
 - `highlights` 必须引用 HealthSummary 中真实存在的事实或模式，优先写具体数字；不要编造症状或训练背景
 - `suggestions` 必须对应 highlights 或 score 的证据，可以涉及睡眠时间、训练强度、恢复、补水、拉伸；不能给医疗诊断

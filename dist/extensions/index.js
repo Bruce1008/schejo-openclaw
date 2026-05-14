@@ -219,6 +219,7 @@ function buildDailyReportPrompt(requestId, summary) {
         "可信度硬规则：",
         "- 只根据下面 HealthSummary 输出 report-0.1 JSON；禁止编造任何未出现事实。",
         "- 缺失/null/样本不足时说数据不完整或无法判断，不能把缺失数据当作好坏。",
+        "- key_metrics 的 7 个值必须都是有限数字；缺失/无法判断时填 0，禁止 null、字符串或省略字段。",
         "- 严重缺数据才固定 score=50：sleep.total_in_bed_min < 60、steps < 100，或心率/HRV/静息心率全无。",
         "- hr_sample_count < 100 但睡眠、活动、HRV/静息心率存在时不要固定 50；照评分表给分，但 score 最高 85。",
         "- steps 只能写“步”；distance_walk_run_m 才能写“米/公里”。",
