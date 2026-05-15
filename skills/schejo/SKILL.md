@@ -46,10 +46,9 @@ HealthSummary 顶层字段：
 
     ```json
     {
-      "schema_version": "report-0.1",
+      "schema_version": "report-0.2",
       "generated_at": "<ISO8601 当前时间 +08:00>",
-      "score": 78,
-      "summary": "今日身体状态良好，恢复充分。",
+      "summary": "睡眠与活动数据支持今日整体状态良好，但心率样本较少，心率区间判断有限。",
       "key_metrics": {
         "resting_hr_bpm": 62,
         "hrv_sdnn_ms": 45,
@@ -72,9 +71,8 @@ HealthSummary 顶层字段：
 
 字段约束：
 
-- `schema_version` 固定为 `report-0.1`
+- `schema_version` 固定为 `report-0.2`
 - `generated_at` 使用当前时间，ISO8601，带 `+08:00`
-- `score` 是 0 到 100 的整数
 - `summary` 是 1 句中文，不超过 80 个汉字
 - `key_metrics` 必须包含且只包含 7 个字段：`resting_hr_bpm`, `hrv_sdnn_ms`, `sleep_total_min`, `sleep_efficiency`, `steps`, `exercise_min`, `active_kcal`
 - `key_metrics` 里的 7 个值都必须是有限数字；缺失或无法判断时用 `0`，禁止使用 `null`、字符串或省略字段
@@ -85,45 +83,28 @@ HealthSummary 顶层字段：
 
 - 所有判断必须能从 HealthSummary 的字段直接推出。不能编造症状、心情、疲劳感、训练目标、饮食、压力、疼痛、疾病、佩戴情况或任何未出现的背景。
 - 数字必须直接来自 HealthSummary 或由字段规则四舍五入得到；不能估算未提供的数值。
-- 需要推理时必须依据下方评分表或明确阈值。例如"睡眠不足"只能来自 `total_asleep_min < 300`；"睡眠效率高"只能来自 `sleep_efficiency >= 0.85`。
+- 需要推理时必须依据下方结论规则或明确阈值。例如"睡眠不足"只能来自 `total_asleep_min < 300`；"睡眠效率高"只能来自 `sleep_efficiency >= 0.85`。
 - 如果数据缺失、为 null、样本数为 0 或明显不足，只能写"数据不完整"、"未同步到"或"无法判断"，不能把缺失数据当作好或坏。
 - `summary` 写总体结论；`highlights` 写有证据的事实观察，优先带一个真实数字；`suggestions` 只能针对已观察到的事实给保守建议。
-- 不确定时选择更保守的表述和分数。宁可少说，不要猜。
+- 不确定时选择更保守的表述。宁可少说，不要猜。
 - `steps` 的单位只能写"步"；`distance_walk_run_m` 的单位才是"米"或"公里"。禁止把步数写成米。
 - 禁止从 `hr_sample_count` 少推断设备佩戴、设备故障或用户行为；只能说"心率样本较少，心率区间判断有限"。
 
-## 评分规则
+## 结论规则
 
-起点 60 分。按下面规则累计后 clamp 到 `[0, 100]`。
-
-| 维度 | 条件 | 加减 |
-|---|---|---|
-| 静息心率 | `resting_bpm < 60` | +10 |
-| 静息心率 | `resting_bpm >= 60 && resting_bpm <= 70` | +5 |
-| 静息心率 | `resting_bpm > 80` | -10 |
-| HRV | `hrv_sdnn_avg_ms > 60` | +10 |
-| HRV | `hrv_sdnn_avg_ms >= 30 && hrv_sdnn_avg_ms <= 60` | +0 |
-| HRV | `hrv_sdnn_avg_ms < 30` | -10 |
-| 睡眠 | `total_asleep_min >= 420` | +15 |
-| 睡眠 | `total_asleep_min >= 300 && total_asleep_min < 420` | +0 |
-| 睡眠 | `total_asleep_min < 300` | -15 |
-| 睡眠质量 | `sleep_efficiency >= 0.85` | +5 |
-| 锻炼 | `exercise_minutes >= 30` | +10 |
-| 锻炼 | `exercise_minutes >= 90` | 额外 +5 |
-| 活跃 | `steps >= 10000` | +5 |
-
-严重数据不足时：如果 `sleep.total_in_bed_min < 60`、`activity_24h.steps < 100`，或 (`hr_sample_count == 0` 且 `hrv_sample_count == 0` 且 `resting_bpm == null`)，`score` 固定为 50，`summary` 必须以 `数据不完整` 开头。
-
-单项可信度不足时：如果 `hr_sample_count < 100` 但睡眠、活动和至少一个心率/HRV指标存在，不要固定 50；照常按评分表计算，但最终 score 不超过 85。可以在 summary 或 highlights 里说"心率样本较少"，但不要建议佩戴设备。
+- 严重数据不足时：如果 `sleep.total_in_bed_min < 60`、`activity_24h.steps < 100`，或 (`hr_sample_count == 0` 且 `hrv_sample_count == 0` 且 `resting_bpm == null`)，`summary` 必须以 `数据不完整` 开头，且不能判断整体身体状态。
+- 如果 `hr_sample_count < 100` 但睡眠、活动和至少一个心率/HRV指标存在，可以在 `summary` 或 `highlights` 里说"心率样本较少，心率区间判断有限"，但不能据此否定其它已有证据。
+- 只有当 `total_asleep_min >= 420` 且 `sleep_efficiency >= 0.85`，才能说睡眠恢复基础较好。
+- 只有当 `total_asleep_min < 300`，才能说睡眠不足。
+- 只有当 `steps >= 10000` 或 `exercise_minutes >= 30`，才能说活动量充足。
+- 只有当 `hrv_sdnn_avg_ms >= 30` 且 `resting_bpm <= 70`，才能说恢复信号尚可或稳定。
 
 部分字段缺失时：
 
-- `resting_bpm` 为 null 且 `hr_p5` 为 null：静息心率不参与加减分，不能评价静息心率好坏。
-- `hrv_sample_count == 0` 或 `hrv_sdnn_avg_ms` 为 null：HRV 不参与加减分，不能评价 HRV 好坏。
+- `resting_bpm` 为 null 且 `hr_p5` 为 null：不能评价静息心率好坏。
+- `hrv_sample_count == 0` 或 `hrv_sdnn_avg_ms` 为 null：不能评价 HRV 好坏。
 - `sleep.stage_count == 0` 或 `total_in_bed_min < 60`：睡眠不参与正向评价，只能说明睡眠数据不足。
 - `workouts` 为空不代表没有运动；只根据 `exercise_minutes`、`steps`、`active_energy_kcal` 判断活动。
-- 只有当 `total_asleep_min >= 420` 且 `sleep_efficiency >= 0.85`，才能说睡眠恢复基础较好。
-- 只有当 `hrv_sdnn_avg_ms >= 30` 且 `resting_bpm <= 70`，才能说恢复信号尚可或稳定。
 
 ## 字段填写
 
@@ -134,9 +115,9 @@ HealthSummary 顶层字段：
 - `steps`: `activity_24h.steps`；null 时用 0
 - `exercise_min`: `activity_24h.exercise_minutes` 四舍五入；null 时用 0
 - `active_kcal`: `activity_24h.active_energy_kcal` 四舍五入；null 时用 0
-- `summary` 必须与 score 和主要证据一致；数据不足时必须以 `数据不完整` 开头
+- `summary` 必须与主要证据一致；数据不足时必须以 `数据不完整` 开头
 - `highlights` 必须引用 HealthSummary 中真实存在的事实或模式，优先写具体数字；不要编造症状或训练背景
-- `suggestions` 必须对应 highlights 或 score 的证据，可以涉及睡眠时间、训练强度、恢复、补水、拉伸；不能给医疗诊断
+- `suggestions` 必须对应 highlights 或 summary 的证据，可以涉及睡眠时间、恢复、补水、拉伸；不能给医疗诊断
 - 如果没有足够证据写满 4 条 highlights 或 3 条 suggestions，少写到最低合法数量，不要凑数
 
 ## 禁止
