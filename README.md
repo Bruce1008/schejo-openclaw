@@ -6,7 +6,8 @@ This public repository owns the OpenClaw side of Schejo:
 - plugin runtime entry: `dist/extensions/index.js`
 - skill instructions: `skills/schejo/SKILL.md`
 - cloud relay default: `http://111.230.239.136/schejo`
-- current plugin version: `0.1.12`
+
+Version source of truth: `package.json` and `openclaw.plugin.json` must match.
 
 ## Owns
 
