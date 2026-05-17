@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { dispatchInboundDirectDmWithRuntime } from "openclaw/plugin-sdk/direct-dm";
+import { jsonResult } from "openclaw/plugin-sdk/core";
 import {
   createChannelPluginBase,
   createChatChannelPlugin,
@@ -13,6 +14,7 @@ import {
   type ChannelSendRawResult,
 } from "openclaw/plugin-sdk/channel-send-result";
 import type { OutboundReplyPayload } from "openclaw/plugin-sdk/reply-payload";
+import { Type } from "typebox";
 
 const CHANNEL_ID = "schejo";
 const DEFAULT_ACCOUNT_ID = "ios";
@@ -23,6 +25,7 @@ const THIN_SLICE_REPLY_PREFIX = "spike-ack:";
 const THIN_SLICE_FALLBACK_DELAY_MS = 1500;
 const DAILY_REPORT_PROMPT_PREFIX = `${SCHEJO_SKILL_PREFIX}请生成今日健康报告`;
 const DAILY_REPORT_PENDING_TTL_MS = 5 * 60 * 1000;
+const ACTIVE_PULL_TIMEOUT_MS = 90 * 1000;
 
 type JsonRecord = Record<string, unknown>;
 type SchejoSendResult = ChannelSendRawResult;
@@ -47,11 +50,39 @@ type PendingDailyReportRequest = {
   rawOutput?: string;
 };
 
+type DailyReportDeliveryResult =
+  | {
+      status: "ready";
+      requestId: string;
+      rawOutput: string;
+      report: JsonRecord;
+    }
+  | {
+      status: "failed";
+      requestId: string;
+      rawOutput?: string;
+      error: string;
+    };
+
+type ActivePullSummary = {
+  pluginRequestId: string;
+  requestId: string;
+  summary: JsonRecord;
+};
+
+type PendingActivePull = {
+  createdAt: number;
+  timeout: ReturnType<typeof setTimeout>;
+  resolve: (summary: ActivePullSummary) => void;
+  reject: (error: Error) => void;
+};
+
 type SchejoSseEvent = {
   type?: unknown;
   body?: unknown;
   id?: unknown;
   request_id?: unknown;
+  plugin_request_id?: unknown;
   summary?: unknown;
   timestamp?: unknown;
 };
@@ -62,7 +93,9 @@ type SchejoDirectDmRuntime = Parameters<typeof dispatchInboundDirectDmWithRuntim
 
 let runtimeState: SchejoRuntimeState | null = null;
 let confirmedPairKey: string | null = null;
+let activeGatewayContext: SchejoGatewayContext | null = null;
 const pendingDailyReports = new Map<string, PendingDailyReportRequest>();
+const pendingActivePulls = new Map<string, PendingActivePull>();
 
 function log(message: string): void {
   console.error(message);
@@ -362,6 +395,34 @@ async function postJson(url: string, body: JsonRecord): Promise<void> {
   }
 }
 
+async function postJsonForBody(url: string, body: JsonRecord): Promise<JsonRecord> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const responseText = await response.text();
+  if (!response.ok) {
+    const detail = responseText ? ` ${responseText.slice(0, 300)}` : "";
+    throw new Error(`HTTP ${response.status}${detail}`);
+  }
+
+  if (!responseText.trim()) return {};
+
+  try {
+    const parsed = JSON.parse(responseText) as unknown;
+    if (!isRecord(parsed)) {
+      throw new Error("response JSON must be an object");
+    }
+    return parsed;
+  } catch (error) {
+    throw new Error(`invalid JSON response: ${formatError(error)}`);
+  }
+}
+
 async function postReplyToCloud(text: string): Promise<void> {
   if (!runtimeState) {
     throw new Error("runtime is not paired");
@@ -415,11 +476,15 @@ async function deliverDailyReportReplyPayload(
   ctx: SchejoGatewayContext,
   requestId: string,
   payload: OutboundReplyPayload,
-): Promise<void> {
+): Promise<DailyReportDeliveryResult> {
   const text = readString(payload.text);
   if (!text) {
     logWithContext(ctx, `[schejo] outbound_empty request_id=${requestId}: no text payload`);
-    return;
+    return {
+      status: "failed",
+      requestId,
+      error: "no text payload",
+    };
   }
 
   const pending = pendingDailyReports.get(requestId);
@@ -457,11 +522,31 @@ async function deliverDailyReportReplyPayload(
       `[schejo] report_posted request_id=${requestId} status=${statusBody.status}`,
     );
   } catch (error) {
-    logWithContext(
-      ctx,
-      `[schejo] report_post_failed request_id=${requestId} status=${statusBody.status}: ${formatError(error)}`,
-    );
+    const message = formatError(error);
+    logWithContext(ctx, `[schejo] report_post_failed request_id=${requestId} status=${statusBody.status}: ${message}`);
+    return {
+      status: "failed",
+      requestId,
+      rawOutput: text,
+      error: `POST /v1/health/report: ${message}`,
+    };
   }
+
+  if (!parsed.ok) {
+    return {
+      status: "failed",
+      requestId,
+      rawOutput: text,
+      error: parsed.error,
+    };
+  }
+
+  return {
+    status: "ready",
+    requestId,
+    rawOutput: text,
+    report: parsed.report,
+  };
 }
 
 function wait(ms: number, signal: AbortSignal): Promise<void> {
@@ -542,14 +627,18 @@ async function dispatchDailyReportRequest(
   ctx: SchejoGatewayContext,
   requestId: string,
   summary: JsonRecord,
-): Promise<void> {
+): Promise<DailyReportDeliveryResult> {
   const runtime = resolveDirectDmRuntime(ctx);
   if (!runtime) {
     logWithContext(
       ctx,
       `[schejo] inbound_error: channelRuntime not available request_id=${requestId}`,
     );
-    return;
+    return {
+      status: "failed",
+      requestId,
+      error: "channelRuntime not available",
+    };
   }
 
   cleanupPendingDailyReports();
@@ -560,6 +649,7 @@ async function dispatchDailyReportRequest(
   });
 
   let delivered = false;
+  let deliveryResult: DailyReportDeliveryResult | undefined;
   const rawBody = buildDailyReportPrompt(requestId, summary);
 
   await dispatchInboundDirectDmWithRuntime({
@@ -587,7 +677,7 @@ async function dispatchDailyReportRequest(
       schejo_event_type: "daily_report_request",
     },
     deliver: async (payload) => {
-      await deliverDailyReportReplyPayload(ctx, requestId, payload);
+      deliveryResult = await deliverDailyReportReplyPayload(ctx, requestId, payload);
       delivered = true;
     },
     onRecordError: (error) => {
@@ -603,7 +693,179 @@ async function dispatchDailyReportRequest(
 
   if (!delivered) {
     logWithContext(ctx, `[schejo] outbound_missing request_id=${requestId}`);
+    return {
+      status: "failed",
+      requestId,
+      error: "no daily report reply delivered",
+    };
   }
+
+  return (
+    deliveryResult ?? {
+      status: "failed",
+      requestId,
+      error: "daily report delivery result missing",
+    }
+  );
+}
+
+class ActivePullTimeoutError extends Error {
+  constructor(pluginRequestId: string) {
+    super(`active pull timed out plugin_request_id=${pluginRequestId}`);
+    this.name = "ActivePullTimeoutError";
+  }
+}
+
+function waitForActivePull(pluginRequestId: string): Promise<ActivePullSummary> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingActivePulls.delete(pluginRequestId);
+      reject(new ActivePullTimeoutError(pluginRequestId));
+    }, ACTIVE_PULL_TIMEOUT_MS);
+
+    pendingActivePulls.set(pluginRequestId, {
+      createdAt: Date.now(),
+      timeout,
+      resolve,
+      reject,
+    });
+  });
+}
+
+function cancelPendingActivePull(pluginRequestId: string): void {
+  const pending = pendingActivePulls.get(pluginRequestId);
+  if (!pending) return;
+  clearTimeout(pending.timeout);
+  pendingActivePulls.delete(pluginRequestId);
+}
+
+function resolvePendingActivePull(summary: ActivePullSummary): boolean {
+  const pending = pendingActivePulls.get(summary.pluginRequestId);
+  if (!pending) return false;
+
+  clearTimeout(pending.timeout);
+  pendingActivePulls.delete(summary.pluginRequestId);
+  pending.resolve(summary);
+  return true;
+}
+
+function asStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => readString(item)).filter((item): item is string => Boolean(item));
+}
+
+function renderDailyReportForChannel(report: JsonRecord): string {
+  const summary = readString(report.summary) ?? "今日健康日报已生成。";
+  const highlights = asStringList(report.highlights);
+  const suggestions = asStringList(report.suggestions);
+
+  const lines = ["今日健康日报", summary];
+
+  if (highlights.length > 0) {
+    lines.push("", "重点");
+    lines.push(...highlights.map((item) => `- ${item}`));
+  }
+
+  if (suggestions.length > 0) {
+    lines.push("", "建议");
+    lines.push(...suggestions.map((item) => `- ${item}`));
+  }
+
+  return lines.join("\n");
+}
+
+async function requestActiveHealthPull(pluginRequestId: string): Promise<{ requestId: string }> {
+  if (!runtimeState) {
+    throw new Error("runtime is not paired");
+  }
+
+  const response = await postJsonForBody(endpoint(runtimeState.cloudUrl, "/v1/health/request_pull"), {
+    openclaw_user_id: runtimeState.openclawUserId,
+    plugin_request_id: pluginRequestId,
+  });
+
+  const status = readString(response.status);
+  const requestId = readString(response.request_id);
+  if (status !== "pulling" || !requestId) {
+    throw new Error("unexpected /v1/health/request_pull response");
+  }
+
+  return { requestId };
+}
+
+function createSchejoRequestPullTool() {
+  return {
+    name: "schejo_request_pull",
+    label: "Schejo Request Pull",
+    description:
+      "Request a fresh Schejo health pull from the paired iPhone, wait for the matching summary, generate the daily report, and return channel-ready text.",
+    parameters: Type.Object({}),
+    async execute() {
+      if (!runtimeState) {
+        return jsonResult({
+          status: "failed",
+          message: "schejo runtime is not paired",
+        });
+      }
+
+      const ctx = activeGatewayContext;
+      if (!ctx) {
+        return jsonResult({
+          status: "failed",
+          message: "schejo gateway account is not active",
+        });
+      }
+
+      const pluginRequestId = randomUUID();
+      const summaryPromise = waitForActivePull(pluginRequestId);
+
+      try {
+        const pull = await requestActiveHealthPull(pluginRequestId);
+        log(
+          `[schejo] active_pull_requested plugin_request_id=${pluginRequestId} request_id=${pull.requestId}`,
+        );
+
+        const inbound = await summaryPromise;
+        log(
+          `[schejo] active_pull_matched plugin_request_id=${pluginRequestId} request_id=${inbound.requestId}`,
+        );
+
+        const result = await dispatchDailyReportRequest(ctx, inbound.requestId, inbound.summary);
+        if (result.status !== "ready") {
+          return jsonResult({
+            status: "failed",
+            request_id: inbound.requestId,
+            plugin_request_id: pluginRequestId,
+            message: result.error,
+          });
+        }
+
+        return jsonResult({
+          status: "ready",
+          request_id: inbound.requestId,
+          plugin_request_id: pluginRequestId,
+          channel_text: renderDailyReportForChannel(result.report),
+          report_json: result.report,
+        });
+      } catch (error) {
+        cancelPendingActivePull(pluginRequestId);
+
+        if (error instanceof ActivePullTimeoutError) {
+          return jsonResult({
+            status: "timeout",
+            plugin_request_id: pluginRequestId,
+            message: "90 秒内没有收到 iPhone 回传的健康数据，请稍后再试。",
+          });
+        }
+
+        return jsonResult({
+          status: "failed",
+          plugin_request_id: pluginRequestId,
+          message: formatError(error),
+        });
+      }
+    },
+  };
 }
 
 async function handleInboundEvent(ctx: SchejoGatewayContext, event: SchejoSseEvent): Promise<void> {
@@ -611,6 +873,7 @@ async function handleInboundEvent(ctx: SchejoGatewayContext, event: SchejoSseEve
 
   if (type === "daily_report_request") {
     const requestId = readString(event.request_id);
+    const pluginRequestId = readString(event.plugin_request_id);
     const summary = asRecord(event.summary);
 
     if (!requestId) {
@@ -632,6 +895,22 @@ async function handleInboundEvent(ctx: SchejoGatewayContext, event: SchejoSseEve
         JSON.stringify(summary),
       )}`,
     );
+
+    if (
+      pluginRequestId &&
+      resolvePendingActivePull({
+        pluginRequestId,
+        requestId,
+        summary,
+      })
+    ) {
+      logWithContext(
+        ctx,
+        `[schejo] inbound_matched_active_pull plugin_request_id=${pluginRequestId} request_id=${requestId}`,
+      );
+      return;
+    }
+
     await dispatchDailyReportRequest(ctx, requestId, summary);
     return;
   }
@@ -958,6 +1237,7 @@ const schejoChannelBase = {
   gateway: {
     async startAccount(ctx) {
       logWithContext(ctx, `[schejo] start_account account=${ctx.accountId}`);
+      activeGatewayContext = ctx;
       await pairWithConfig(ctx.cfg);
       if (runtimeState) {
         await runSseLoop({
@@ -968,6 +1248,9 @@ const schejoChannelBase = {
         });
       } else {
         await waitForAbort(ctx.abortSignal);
+      }
+      if (activeGatewayContext === ctx) {
+        activeGatewayContext = null;
       }
       logWithContext(ctx, `[schejo] stop_account account=${ctx.accountId}`);
     },
@@ -1056,6 +1339,7 @@ export default defineChannelPluginEntry({
   description: "schejo iOS app channel",
   plugin: schejoChannelPlugin,
   registerFull(api) {
+    api.registerTool(createSchejoRequestPullTool(), { name: "schejo_request_pull" });
     void pairWithCloud(api).catch((error) => {
       log(`[schejo] FATAL: ${formatError(error)}`);
     });

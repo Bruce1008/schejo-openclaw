@@ -9,7 +9,10 @@ description: Generate a strict JSON daily health report from Schejo HealthSummar
 
 当收到的 raw text 中出现 `schejo` 时启用本 skill。
 
-日报生成任务要求 raw text 同时包含 `请生成今日健康报告` 和 `[HEALTH_SUMMARY_JSON]`。
+本 skill 有两种日报入口：
+
+1. **被动日报**：raw text 同时包含 `请生成今日健康报告` 和 `[HEALTH_SUMMARY_JSON]`
+2. **主动拉取**：用户直接要求“生成今日健康日报 / 看一下身体状态”一类当前状态请求，但 raw text 中还没有 `[HEALTH_SUMMARY_JSON]`
 
 ## 输入
 
@@ -35,10 +38,15 @@ HealthSummary 顶层字段：
 先判断输入类型：
 
 - 如果 raw text 同时包含 `请生成今日健康报告` 和 `[HEALTH_SUMMARY_JSON]`，只根据 HealthSummary 计算并输出一个 DailyReport JSON。
+- 如果用户要求生成今日健康日报或查看当前身体状态，但 raw text 中还没有 `[HEALTH_SUMMARY_JSON]`：
+  1. 调用 `schejo_request_pull` 工具且只调用一次；
+  2. 如果工具返回 `status="ready"`，把 `channel_text` **原样**作为最终回复；
+  3. 如果工具返回 `status="timeout"` 或 `status="failed"`，把 `{ "status": "...", "message": "..." }` 的紧凑 JSON 文本作为最终回复；
+  4. 不要在主动拉取路径里自行编造日报，也不要把工具返回的 `report_json` 改写成新的结论。
 - 如果 raw text 包含 `schejo` 和 `ping`，立即回复 `spike-ack: <raw text 原文>`。
 - 其它只包含 `schejo` 但不符合上述两类的内容，不要输出任何回复。
 
-不要调用任何工具，不要补充 HealthSummary 里没有的数据。可信度优先：不知道就说数据不完整或无法判断，不要为了让报告好看而补故事。
+除主动拉取路径里的 `schejo_request_pull` 外，不要调用任何工具。不要补充 HealthSummary 里没有的数据。可信度优先：不知道就说数据不完整或无法判断，不要为了让报告好看而补故事。
 
 ## 日报输出格式
 
@@ -124,7 +132,7 @@ HealthSummary 顶层字段：
 
 - 日报任务禁止输出 JSON 代码块以外的任何文字
 - ping 任务禁止输出 `spike-ack: <raw text 原文>` 以外的任何文字
-- 禁止调用 MCP 工具
+- 除主动拉取路径里的 `schejo_request_pull` 外，禁止调用其它工具
 - 禁止医疗诊断、疾病判断、用药建议
 - 禁止编造 HealthSummary 没有的数据
 - 禁止把缺失数据说成正常、异常、达标或不达标
