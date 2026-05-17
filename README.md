@@ -14,7 +14,7 @@ Version source of truth: `package.json` and `openclaw.plugin.json` must match.
 - channel registration and pairing
 - SSE event handling from cloud
 - daily-report dispatch into OpenClaw
-- active pull tool `schejo_request_pull` for ad-hoc / cron turns
+- active pull tools `schejo_request_pull` + `schejo_submit_report` for ad-hoc / cron turns
 - outbound JSON extraction and relay back to cloud
 - Schejo skill instructions
 

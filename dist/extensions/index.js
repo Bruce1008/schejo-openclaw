@@ -581,7 +581,7 @@ function createSchejoRequestPullTool() {
     return {
         name: "schejo_request_pull",
         label: "Schejo Request Pull",
-        description: "Request a fresh Schejo health pull from the paired iPhone, wait for the matching summary, generate the daily report, and return channel-ready text.",
+        description: "Request a fresh Schejo health pull from the paired iPhone and wait for the matching HealthSummary payload.",
         parameters: Type.Object({}),
         async execute() {
             if (!runtimeState) {
@@ -604,21 +604,11 @@ function createSchejoRequestPullTool() {
                 log(`[schejo] active_pull_requested plugin_request_id=${pluginRequestId} request_id=${pull.requestId}`);
                 const inbound = await summaryPromise;
                 log(`[schejo] active_pull_matched plugin_request_id=${pluginRequestId} request_id=${inbound.requestId}`);
-                const result = await dispatchDailyReportRequest(ctx, inbound.requestId, inbound.summary);
-                if (result.status !== "ready") {
-                    return jsonResult({
-                        status: "failed",
-                        request_id: inbound.requestId,
-                        plugin_request_id: pluginRequestId,
-                        message: result.error,
-                    });
-                }
                 return jsonResult({
                     status: "ready",
                     request_id: inbound.requestId,
                     plugin_request_id: pluginRequestId,
-                    channel_text: renderDailyReportForChannel(result.report),
-                    report_json: result.report,
+                    summary: inbound.summary,
                 });
             }
             catch (error) {
@@ -634,6 +624,55 @@ function createSchejoRequestPullTool() {
                     status: "failed",
                     plugin_request_id: pluginRequestId,
                     message: formatError(error),
+                });
+            }
+        },
+    };
+}
+function createSchejoSubmitReportTool() {
+    return {
+        name: "schejo_submit_report",
+        label: "Schejo Submit Report",
+        description: "Submit one generated Schejo DailyReport to cloud so the paired iPhone receives it, then return channel-ready text.",
+        parameters: Type.Object({
+            request_id: Type.String(),
+            report_json: Type.Unknown(),
+        }),
+        async execute(_toolCallId, params) {
+            const body = asRecord(params);
+            const requestId = readString(body.request_id);
+            const report = body.report_json;
+            if (!requestId) {
+                return jsonResult({
+                    status: "failed",
+                    message: "request_id is required",
+                });
+            }
+            if (!isRecord(report)) {
+                return jsonResult({
+                    status: "failed",
+                    request_id: requestId,
+                    message: "report_json must be an object",
+                });
+            }
+            try {
+                await postHealthReportToCloud({
+                    request_id: requestId,
+                    status: "ready",
+                    report_json: report,
+                });
+                log(`[schejo] active_report_posted request_id=${requestId}`);
+                return jsonResult({
+                    status: "ready",
+                    request_id: requestId,
+                    channel_text: renderDailyReportForChannel(report),
+                });
+            }
+            catch (error) {
+                return jsonResult({
+                    status: "failed",
+                    request_id: requestId,
+                    message: `POST /v1/health/report: ${formatError(error)}`,
                 });
             }
         },
@@ -1045,6 +1084,7 @@ export default defineChannelPluginEntry({
     plugin: schejoChannelPlugin,
     registerFull(api) {
         api.registerTool(createSchejoRequestPullTool(), { name: "schejo_request_pull" });
+        api.registerTool(createSchejoSubmitReportTool(), { name: "schejo_submit_report" });
         void pairWithCloud(api).catch((error) => {
             log(`[schejo] FATAL: ${formatError(error)}`);
         });
