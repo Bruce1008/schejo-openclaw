@@ -4,6 +4,7 @@ import { jsonResult } from "openclaw/plugin-sdk/core";
 import { createChannelPluginBase, createChatChannelPlugin, defineChannelPluginEntry, } from "openclaw/plugin-sdk/channel-core";
 import { createRawChannelSendResultAdapter, } from "openclaw/plugin-sdk/channel-send-result";
 import { Type } from "typebox";
+import { addInjury, changeStatus, checkReminders, cleanExpiredSignals, loadState, processAnswer, pushBodySignal, saveState, } from "./state.js";
 const CHANNEL_ID = "schejo";
 const DEFAULT_ACCOUNT_ID = "ios";
 const SCHEJO_SKILL_PREFIX = "使用schejo skill。";
@@ -284,19 +285,57 @@ function formatUserProfileSection(profile) {
         "- 训练计划（具体动作 / 强度 / 组数 / 周期）仍属本期范围外，不要给出。",
     ].join("\n");
 }
-function buildDailyReportPrompt(requestId, summary, userProfile) {
+function formatReminderSection(prompt) {
+    const { reminder, questionId } = prompt;
+    if (reminder.kind !== "injury_check") {
+        return [
+            "## 待复查 reminder",
+            `- 类型：${reminder.kind}`,
+            `- question_id：${questionId}`,
+            "",
+            "（仅当存在 reminder 时生效）在 report 顶层 JSON 中额外输出 question 字段，详见下方规则。",
+        ].join("\n");
+    }
+    const description = reminder.description ?? "";
+    const nextCheck = reminder.next_check_at ?? "";
+    const injuryIdx = reminder.injury_idx ?? 0;
+    return [
+        "## 待复查 reminder（仅当存在 reminder 时生效）",
+        "- 类型：injury_check",
+        `- 用户上次报告："${description}"`,
+        `- 该复查日期：${nextCheck}`,
+        "",
+        "注入规则（必须严格遵守）：",
+        "- 在 report 顶层 JSON 中额外输出 `question` 字段，结构如下：",
+        "  {",
+        `    "question_id": "${questionId}",`,
+        `    "text": "<不超过 60 字的中文询问，自然口语，应直接引用用户描述，例如\\"你之前提到的${description}怎么样了？\\">",`,
+        `    "quick_answers": ["好了", "快好了", "还没好", "老毛病"],`,
+        `    "free_text_allowed": true,`,
+        `    "context": { "kind": "injury_check", "injury_idx": ${injuryIdx} }`,
+        "  }",
+        "- question_id / context.kind / context.injury_idx 必须原样输出，不要改值。",
+        "- quick_answers 4 选 1 必须原样，不要换字、不要增减项。",
+        "- 不要追问细节、不要写多句、不要医学诊断。",
+        "- 若本次 reminder 不存在（本段不出现）则 report 不要含 question 字段。",
+    ].join("\n");
+}
+function buildDailyReportPrompt(requestId, summary, userProfile, reminder) {
     const hasProfile = hasUserProfile(userProfile);
     const forbidLine = hasProfile
         ? "- 禁止建议佩戴设备、检查设备、保持监测连续性；禁止推测设备、压力、疲劳、疼痛、饮食、训练计划。"
         : "- 禁止建议佩戴设备、检查设备、保持监测连续性；禁止推测设备、压力、疲劳、疼痛、饮食、训练目标、训练计划。";
+    const schemaLine = reminder
+        ? "- report 输出 report-0.3 JSON；只输出 schema_version、generated_at、summary、key_metrics、highlights、suggestions、question；其中 schema_version 写成 \"report-0.3\"。"
+        : "- report 输出 report-0.2 JSON；只输出 schema_version、generated_at、summary、key_metrics、highlights、suggestions；schema_version 写成 \"report-0.2\"。";
     const lines = [
         DAILY_REPORT_PROMPT_PREFIX,
         "",
         `request_id: ${requestId}`,
         "",
         "可信度硬规则：",
-        "- 只根据下面 HealthSummary 输出 report-0.2 JSON；禁止编造任何未出现事实。",
-        "- report-0.2 不包含 score；只输出 schema_version、generated_at、summary、key_metrics、highlights、suggestions。",
+        "- 只根据下面 HealthSummary 输出 JSON；禁止编造任何未出现事实。",
+        schemaLine,
         "- 缺失/null/样本不足时说数据不完整或无法判断，不能把缺失数据当作好坏。",
         "- key_metrics 的 7 个值必须都是有限数字；缺失/无法判断时填 0，禁止 null、字符串或省略字段。",
         "- 严重缺数据时 summary 必须以“数据不完整”开头，不得判断整体身体状态。",
@@ -309,8 +348,33 @@ function buildDailyReportPrompt(requestId, summary, userProfile) {
     if (hasProfile) {
         lines.push("", formatUserProfileSection(userProfile));
     }
+    if (reminder) {
+        lines.push("", formatReminderSection(reminder));
+    }
     lines.push("", "[HEALTH_SUMMARY_JSON]", JSON.stringify(summary), "[/HEALTH_SUMMARY_JSON]");
     return lines.join("\n");
+}
+// 在 daily report turn 入口被调用：load state -> 清过期 signals -> save state (若有清理)
+// -> 检查 reminders -> 取第一条 -> 生成 question_id。MVP-4 单 turn 最多 1 个 question。
+function prepareReminderForDailyReport() {
+    let state = loadState();
+    const cleaned = cleanExpiredSignals(state);
+    if (cleaned !== state) {
+        state = cleaned;
+        try {
+            saveState(state);
+        }
+        catch (error) {
+            log(`[schejo] state_save_failed (clean signals): ${formatError(error)}`);
+        }
+    }
+    const reminders = checkReminders(state);
+    if (reminders.length === 0)
+        return null;
+    return {
+        reminder: reminders[0],
+        questionId: randomUUID(),
+    };
 }
 async function postJson(url, body) {
     const response = await fetch(url, {
@@ -530,7 +594,11 @@ async function dispatchDailyReportRequest(ctx, requestId, summary, userProfile) 
     });
     let delivered = false;
     let deliveryResult;
-    const rawBody = buildDailyReportPrompt(requestId, summary, userProfile);
+    const reminder = prepareReminderForDailyReport();
+    if (reminder) {
+        logWithContext(ctx, `[schejo] daily_report_reminder request_id=${requestId} kind=${reminder.reminder.kind} question_id=${reminder.questionId} injury_idx=${reminder.reminder.injury_idx ?? "n/a"}`);
+    }
+    const rawBody = buildDailyReportPrompt(requestId, summary, userProfile, reminder);
     await dispatchInboundDirectDmWithRuntime({
         cfg: ctx.cfg,
         runtime,
@@ -579,6 +647,57 @@ async function dispatchDailyReportRequest(ctx, requestId, summary, userProfile) 
         requestId,
         error: "daily report delivery result missing",
     });
+}
+function parseUserAnswerEvent(event) {
+    const questionId = readString(event.question_id);
+    const answer = readString(event.answer);
+    const answeredAt = readString(event.answered_at);
+    const contextRaw = event.context;
+    if (!questionId || !answer || !answeredAt)
+        return null;
+    if (!isRecord(contextRaw))
+        return null;
+    const kind = readString(contextRaw.kind);
+    if (kind !== "injury_check" && kind !== "status_change" && kind !== "signal_capture") {
+        return null;
+    }
+    const ctx = { kind };
+    if (kind === "injury_check") {
+        const idx = contextRaw.injury_idx;
+        if (typeof idx !== "number" || !Number.isInteger(idx) || idx < 0)
+            return null;
+        ctx.injury_idx = idx;
+    }
+    return {
+        question_id: questionId,
+        answer,
+        answered_at: answeredAt,
+        context: ctx,
+    };
+}
+function handleUserAnswerEvent(ctx, event) {
+    const parsed = parseUserAnswerEvent(event);
+    if (!parsed) {
+        logWithContext(ctx, "[schejo] inbound_error: malformed user_answer event");
+        return;
+    }
+    let state;
+    try {
+        state = loadState();
+    }
+    catch (error) {
+        logWithContext(ctx, `[schejo] state_load_failed: ${formatError(error)}`);
+        return;
+    }
+    const next = processAnswer(state, parsed);
+    try {
+        saveState(next);
+    }
+    catch (error) {
+        logWithContext(ctx, `[schejo] state_save_failed: ${formatError(error)}`);
+        return;
+    }
+    logWithContext(ctx, `[schejo] user_answer_applied question_id=${parsed.question_id} kind=${parsed.context.kind} injury_idx=${parsed.context.injury_idx ?? "n/a"}`);
 }
 class ActivePullTimeoutError extends Error {
     constructor(pluginRequestId) {
@@ -707,6 +826,122 @@ function createSchejoRequestPullTool() {
         },
     };
 }
+const USER_STATE_STATUS_VALUES = [
+    "available",
+    "sick",
+    "injured",
+    "busy",
+    "traveling",
+    "low_motivation",
+];
+function createSchejoAddInjuryTool() {
+    return {
+        name: "schejo_add_injury",
+        label: "Schejo Add Injury",
+        description: "Append a new injury entry to plugin-local state-0.1 (ADR 0008). Use when the user reports a fresh body issue. Sets reported_at to today and next_check_at to today+N days (default 14) when status is active.",
+        parameters: Type.Object({
+            description: Type.String(),
+            status: Type.Optional(Type.Union([
+                Type.Literal("active"),
+                Type.Literal("chronic"),
+            ])),
+            next_check_at_days: Type.Optional(Type.Number()),
+        }),
+        async execute(_toolCallId, params) {
+            const body = asRecord(params);
+            const description = readString(body.description);
+            if (!description) {
+                return jsonResult({ status: "failed", message: "description is required" });
+            }
+            const statusRaw = readString(body.status);
+            const status = statusRaw === "chronic" ? "chronic" : "active";
+            const daysRaw = body.next_check_at_days;
+            const nextCheckAtDays = typeof daysRaw === "number" && Number.isFinite(daysRaw) && daysRaw > 0
+                ? Math.round(daysRaw)
+                : undefined;
+            try {
+                const state = loadState();
+                const next = addInjury(state, { description, status, nextCheckAtDays });
+                saveState(next);
+                log(`[schejo] state_add_injury status=${status} next_check_days=${nextCheckAtDays ?? "default"}`);
+                return jsonResult({
+                    status: "ok",
+                    injuries_count: next.injuries.length,
+                });
+            }
+            catch (error) {
+                return jsonResult({ status: "failed", message: formatError(error) });
+            }
+        },
+    };
+}
+function createSchejoChangeStatusTool() {
+    return {
+        name: "schejo_change_status",
+        label: "Schejo Change Status",
+        description: "Change plugin-local user_state.status to one of available / sick / injured / busy / traveling / low_motivation (state-0.1, ADR 0008). Sets since to today. Optional next_check_at_days schedules a follow-up; pass null/omit to skip the follow-up.",
+        parameters: Type.Object({
+            to: Type.Union(USER_STATE_STATUS_VALUES.map((v) => Type.Literal(v))),
+            next_check_at_days: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+        }),
+        async execute(_toolCallId, params) {
+            const body = asRecord(params);
+            const toRaw = readString(body.to);
+            if (!toRaw || !USER_STATE_STATUS_VALUES.includes(toRaw)) {
+                return jsonResult({
+                    status: "failed",
+                    message: `to must be one of ${USER_STATE_STATUS_VALUES.join(" / ")}`,
+                });
+            }
+            const to = toRaw;
+            const daysRaw = body.next_check_at_days;
+            const nextCheckAtDays = daysRaw === null
+                ? null
+                : typeof daysRaw === "number" && Number.isFinite(daysRaw)
+                    ? Math.round(daysRaw)
+                    : undefined;
+            try {
+                const state = loadState();
+                const next = changeStatus(state, { to, nextCheckAtDays });
+                saveState(next);
+                log(`[schejo] state_change_status to=${to} next_check_days=${nextCheckAtDays ?? "null"}`);
+                return jsonResult({ status: "ok", user_state: next.user_state });
+            }
+            catch (error) {
+                return jsonResult({ status: "failed", message: formatError(error) });
+            }
+        },
+    };
+}
+function createSchejoUpdateStateTool() {
+    return {
+        name: "schejo_update_state",
+        label: "Schejo Update State",
+        description: "Push a short-lived body signal (state-0.1 signals.body, 72h TTL, ADR 0008). Use when the user mentions a transient signal (pain / fatigue / dizziness / sickness) that doesn't yet warrant a new injury entry.",
+        parameters: Type.Object({
+            signal_type: Type.String(),
+            detail: Type.String(),
+        }),
+        async execute(_toolCallId, params) {
+            const body = asRecord(params);
+            const signalType = readString(body.signal_type);
+            const detail = readString(body.detail);
+            if (!signalType || !detail) {
+                return jsonResult({ status: "failed", message: "signal_type and detail are required" });
+            }
+            try {
+                const state = loadState();
+                const next = pushBodySignal(state, { type: signalType, detail });
+                saveState(next);
+                log(`[schejo] state_push_signal type=${signalType}`);
+                return jsonResult({ status: "ok", signals_count: next.signals.body.length });
+            }
+            catch (error) {
+                return jsonResult({ status: "failed", message: formatError(error) });
+            }
+        },
+    };
+}
 function createSchejoSubmitReportTool() {
     return {
         name: "schejo_submit_report",
@@ -784,6 +1019,10 @@ async function handleInboundEvent(ctx, event) {
             return;
         }
         await dispatchDailyReportRequest(ctx, requestId, summary, userProfile);
+        return;
+    }
+    if (type === "user_answer") {
+        handleUserAnswerEvent(ctx, event);
         return;
     }
     if (type !== "ping") {
@@ -1166,6 +1405,9 @@ export default defineChannelPluginEntry({
     registerFull(api) {
         api.registerTool(createSchejoRequestPullTool(), { name: "schejo_request_pull" });
         api.registerTool(createSchejoSubmitReportTool(), { name: "schejo_submit_report" });
+        api.registerTool(createSchejoAddInjuryTool(), { name: "schejo_add_injury" });
+        api.registerTool(createSchejoChangeStatusTool(), { name: "schejo_change_status" });
+        api.registerTool(createSchejoUpdateStateTool(), { name: "schejo_update_state" });
         void pairWithCloud(api).catch((error) => {
             log(`[schejo] FATAL: ${formatError(error)}`);
         });

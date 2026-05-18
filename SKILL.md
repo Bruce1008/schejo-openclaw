@@ -61,7 +61,7 @@ profile 缺失（被动 prompt 没有"## 用户画像"段，或主动拉取 tool
 - 如果 raw text 包含 `schejo` 和 `ping`，立即回复 `spike-ack: <raw text 原文>`。
 - 其它只包含 `schejo` 但不符合上述两类的内容，不要输出任何回复。
 
-除主动拉取路径里的 `schejo_request_pull` 和 `schejo_submit_report` 外，不要调用任何工具。不要补充 HealthSummary 里没有的数据。可信度优先：不知道就说数据不完整或无法判断，不要为了让报告好看而补故事。
+日报任务路径（被动 + 主动拉取）只允许调 `schejo_request_pull` 与 `schejo_submit_report`；对话中识别用户身体信号时另按"state 维护规则"节调 `schejo_add_injury` / `schejo_change_status` / `schejo_update_state`；其它工具不调。不要补充 HealthSummary 里没有的数据。可信度优先：不知道就说数据不完整或无法判断，不要为了让报告好看而补故事。
 
 ## 日报输出格式
 
@@ -125,6 +125,35 @@ profile 缺失（被动 prompt 没有"## 用户画像"段，或主动拉取 tool
 
 profile 缺失时，本节不生效；按 MVP-2 输出。
 
+## state 维护规则（MVP-4，state-0.1）
+
+本 skill 维护 plugin 本地 `state-0.1`（user_state + injuries + signals；ADR 0008），仅在用户对话中**明确**表达以下信号时调用对应工具；**单次 turn 最多调一次**，同一 turn 不要反复落同类条目：
+
+- 用户说"X 部位扭了 / 受伤 / 拉伤 / 摔了"等急性伤 → `schejo_add_injury({description:"<部位+一句话>", status:"active"})`
+- 用户说"长期 X 部位有问题 / 老毛病" → `schejo_add_injury({description:"...", status:"chronic"})`
+- 用户说"生病 / 发烧 / 感冒" → `schejo_change_status({to:"sick", next_check_at_days:1})`
+- 用户说"出差 / 旅行中" → `schejo_change_status({to:"traveling"})`
+- 用户说"最近忙 / 没时间" → `schejo_change_status({to:"busy"})`
+- 用户说"动力低 / 不想练" → `schejo_change_status({to:"low_motivation"})`
+- 用户报告短期不适（"今天有点累 / 头晕"）但未达受伤程度 → `schejo_update_state({signal_type:"fatigue|dizziness|pain|...", detail:"<用户原话>"})`
+
+不要：
+
+- 含糊措辞（"不太对劲 / 怪怪的"）直接落工具；先问一句"具体哪里不对劲"，等用户说出具体部位/症状再调
+- 把训练计划 / readiness / 饮食建议塞进这些工具的参数
+- 在生成日报的同一次 turn 内反向调 state 工具（日报路径只走 `schejo_request_pull` + `schejo_submit_report`）
+- 反复在同一 turn 对同一症状调多次
+
+## 日报路径中的 reminder（report-0.3 升级）
+
+如果 daily report prompt 中**额外**含有 `## 待复查 reminder` 段：
+
+- 此次 report 必须输出 `report-0.3` 形态：在原 6 个字段外，**顶层再加** `question` 字段
+- `question.question_id` / `question.context.kind` / `question.context.injury_idx` 必须**原样**抄 reminder 段给的值，**不要自己改 ID 或 idx**
+- `question.text` 应直接引用伤病描述，自然口语（"你之前提到的 X 怎么样了？"），不超过 60 字
+- `question.quick_answers` 原样输出 `["好了","快好了","还没好","老毛病"]`
+- 没有 reminder 段时，本节不生效，按 report-0.2 输出（顶层不含 question 字段）
+
 ## 结论规则
 
 - 严重数据不足时：如果 `sleep.total_in_bed_min < 60`、`activity_24h.steps < 100`，或 (`hr_sample_count == 0` 且 `hrv_sample_count == 0` 且 `resting_bpm == null`)，`summary` 必须以 `数据不完整` 开头，且不能判断整体身体状态。
@@ -159,7 +188,7 @@ profile 缺失时，本节不生效；按 MVP-2 输出。
 
 - 日报任务禁止输出 JSON 代码块以外的任何文字
 - ping 任务禁止输出 `spike-ack: <raw text 原文>` 以外的任何文字
-- 除主动拉取路径里的 `schejo_request_pull` 与 `schejo_submit_report` 外，禁止调用其它工具
+- 除主动拉取路径里的 `schejo_request_pull` / `schejo_submit_report`，以及 state 维护路径里的 `schejo_add_injury` / `schejo_change_status` / `schejo_update_state` 外，禁止调用其它工具
 - 禁止医疗诊断、疾病判断、用药建议
 - 禁止编造 HealthSummary 没有的数据
 - 禁止把缺失数据说成正常、异常、达标或不达标
