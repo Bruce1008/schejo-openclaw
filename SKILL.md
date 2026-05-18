@@ -33,6 +33,19 @@ HealthSummary 顶层字段：
 - `activity_24h`: `steps`, `flights_climbed`, `push_count`, `swimming_stroke_count`, `number_of_times_fallen`, `active_energy_kcal`, `basal_energy_kcal`, `exercise_minutes`, `stand_minutes`, `time_in_daylight_minutes`, `distance_walk_run_m`, `distance_cycling_m`, `distance_swimming_m`
 - `workouts`: `{ type, duration_min, energy_kcal }[]`
 
+UserProfile（profile-0.1，可选；被动日报路径会直接以"## 用户画像"段出现在 prompt 中；主动拉取路径中 `schejo_request_pull` 工具的 `status="ready"` 返回会带 `user_profile` 字段）。字段：
+
+- `schema_version`: 固定 `profile-0.1`
+- `updated_at`: ISO8601 带时区
+- `basics`: `{ birth_year, sex, height_cm, weight_kg }`，每项可为 null
+- `goal`: 数组（至少 1 项），值 ∈ `lose_fat` / `gain_muscle` / `endurance` / `general_health`
+- `level`: enum，值 ∈ `sedentary` / `beginner` / `intermediate` / `advanced`
+- `equipment`: 数组（至少 1 项），值 ∈ `gym` / `home_with_equipment` / `home_no_equipment` / `outdoor`
+- `training_time`: 数组（至少 1 项），值 ∈ `dawn` / `morning` / `midday` / `evening` / `night`
+- `injuries`: 文本（≤500 字符）或 null
+
+profile 缺失（被动 prompt 没有"## 用户画像"段，或主动拉取 tool 没返回 `user_profile`）时，按 MVP-2 通用模式输出；profile 存在时按下方 profile 注入规则参考。
+
 ## 任务
 
 先判断输入类型：
@@ -40,7 +53,7 @@ HealthSummary 顶层字段：
 - 如果 raw text 同时包含 `请生成今日健康报告` 和 `[HEALTH_SUMMARY_JSON]`，只根据 HealthSummary 计算并输出一个 DailyReport JSON。
 - 如果用户要求生成今日健康日报或查看当前身体状态，但 raw text 中还没有 `[HEALTH_SUMMARY_JSON]`：
   1. 调用 `schejo_request_pull` 工具且只调用一次；
-  2. 如果工具返回 `status="ready"`，只根据工具返回的 `summary` 按下方同一套规则生成一个 `report-0.2` 对象；
+  2. 如果工具返回 `status="ready"`，只根据工具返回的 `summary` 按下方同一套规则生成一个 `report-0.2` 对象；如果同一返回里含 `user_profile`（非空对象），还要按下方 profile 注入规则把 `goal` / `level` / `injuries` 显式带进 suggestions；
   3. 立即调用 `schejo_submit_report` 工具且只调用一次，参数必须带 `request_id` 与刚生成的 `report_json`；
   4. 如果 `schejo_submit_report` 返回 `status="ready"`，把它返回的 `channel_text` **原样**作为最终回复；
   5. 如果任一工具返回 `status="timeout"` 或 `status="failed"`，把 `{ "status": "...", "message": "..." }` 的紧凑 JSON 文本作为最终回复；
@@ -99,6 +112,18 @@ HealthSummary 顶层字段：
 - 不确定时选择更保守的表述。宁可少说，不要猜。
 - `steps` 的单位只能写"步"；`distance_walk_run_m` 的单位才是"米"或"公里"。禁止把步数写成米。
 - 禁止从 `hr_sample_count` 少推断设备佩戴、设备故障或用户行为；只能说"心率样本较少，心率区间判断有限"。
+
+## profile 注入规则
+
+仅当 prompt 含 `## 用户画像（profile-0.1）` 段，或主动拉取工具 `status="ready"` 返回含 `user_profile`：
+
+- `suggestions` 必须显式参考 `goal` 与 `level`，用人话说出"为什么这条建议适合这位用户"。
+- 若 `injuries` 非空（非 null 非空串、非"无"），`suggestions` 中至少有 1 条直接回应该伤病（避开禁忌动作 / 用人话提示），不要忽略。
+- 只允许引用 profile 提供的字段；不要替用户编造未提供的目标、动作、组数、强度。
+- 训练计划（具体动作 / 强度 / 组数 / 周期）仍属本期范围外，不要给出。
+- profile 存在时，前述禁止 list 中的"禁止推测训练目标"被本节覆盖；其余禁止项（训练计划、压力、疲劳、设备等）仍然有效。
+
+profile 缺失时，本节不生效；按 MVP-2 输出。
 
 ## 结论规则
 

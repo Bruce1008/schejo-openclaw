@@ -215,8 +215,81 @@ function cleanupPendingDailyReports() {
         }
     }
 }
-function buildDailyReportPrompt(requestId, summary) {
+const GOAL_DISPLAY = {
+    lose_fat: "减脂",
+    gain_muscle: "增肌",
+    endurance: "提升耐力",
+    general_health: "健康维持",
+};
+const LEVEL_DISPLAY = {
+    sedentary: "久坐少动",
+    beginner: "新手（偶尔训练）",
+    intermediate: "进阶（规律训练）",
+    advanced: "高阶（系统训练）",
+};
+const EQUIPMENT_DISPLAY = {
+    gym: "健身房",
+    home_with_equipment: "家中有器械",
+    home_no_equipment: "家中无器械",
+    outdoor: "户外",
+};
+const TRAINING_TIME_DISPLAY = {
+    dawn: "清晨",
+    morning: "上午",
+    midday: "午间",
+    evening: "傍晚",
+    night: "夜间",
+};
+const SEX_DISPLAY = {
+    male: "男",
+    female: "女",
+    other: "其他",
+};
+function hasUserProfile(userProfile) {
+    return Boolean(userProfile) && Object.keys(userProfile).length > 0;
+}
+function formatUserProfileSection(profile) {
+    const goalArr = Array.isArray(profile.goal) ? profile.goal : [];
+    const goal = goalArr.map((g) => GOAL_DISPLAY[String(g)] ?? String(g)).join("、") || "未填";
+    const levelStr = typeof profile.level === "string" ? profile.level : "";
+    const level = LEVEL_DISPLAY[levelStr] ?? "未填";
+    const eqArr = Array.isArray(profile.equipment) ? profile.equipment : [];
+    const equipment = eqArr.map((e) => EQUIPMENT_DISPLAY[String(e)] ?? String(e)).join("、") || "未填";
+    const ttArr = Array.isArray(profile.training_time)
+        ? profile.training_time
+        : [];
+    const trainingTime = ttArr.map((t) => TRAINING_TIME_DISPLAY[String(t)] ?? String(t)).join("、") || "未填";
+    const injuriesRaw = typeof profile.injuries === "string" ? profile.injuries.trim() : "";
+    const injuries = injuriesRaw ? injuriesRaw : "无";
+    const basicsRec = isRecord(profile.basics) ? profile.basics : {};
+    const birthYear = typeof basicsRec.birth_year === "number" ? `${basicsRec.birth_year} 年生` : "出生年未填";
+    const sex = typeof basicsRec.sex === "string" && SEX_DISPLAY[basicsRec.sex]
+        ? SEX_DISPLAY[basicsRec.sex]
+        : "性别未填";
+    const heightCm = typeof basicsRec.height_cm === "number" ? `${basicsRec.height_cm}cm` : "身高未填";
+    const weightKg = typeof basicsRec.weight_kg === "number" ? `${basicsRec.weight_kg}kg` : "体重未填";
     return [
+        "## 用户画像（profile-0.1）",
+        `- 目标：${goal}`,
+        `- 训练水平：${level}`,
+        `- 可用器材：${equipment}`,
+        `- 训练时段偏好：${trainingTime}`,
+        `- 伤病 / 注意事项：${injuries}`,
+        `- 基本：${birthYear} / ${sex} / ${heightCm} / ${weightKg}`,
+        "",
+        "profile 注入规则（仅当存在 profile 时生效）：",
+        "- suggestions 必须显式参考“目标”与“训练水平”，并用人话说出“为什么这条建议适合这位用户”。",
+        "- 若“伤病 / 注意事项”非空（不是“无”），suggestions 中至少有 1 条直接回应该伤病（避开禁忌动作 / 用人话提示）。",
+        "- 仅允许引用 profile 已知字段；不要为用户编造未提供的目标、动作、组数、强度。",
+        "- 训练计划（具体动作 / 强度 / 组数 / 周期）仍属本期范围外，不要给出。",
+    ].join("\n");
+}
+function buildDailyReportPrompt(requestId, summary, userProfile) {
+    const hasProfile = hasUserProfile(userProfile);
+    const forbidLine = hasProfile
+        ? "- 禁止建议佩戴设备、检查设备、保持监测连续性；禁止推测设备、压力、疲劳、疼痛、饮食、训练计划。"
+        : "- 禁止建议佩戴设备、检查设备、保持监测连续性；禁止推测设备、压力、疲劳、疼痛、饮食、训练目标、训练计划。";
+    const lines = [
         DAILY_REPORT_PROMPT_PREFIX,
         "",
         `request_id: ${requestId}`,
@@ -229,14 +302,15 @@ function buildDailyReportPrompt(requestId, summary) {
         "- 严重缺数据时 summary 必须以“数据不完整”开头，不得判断整体身体状态。",
         "- hr_sample_count < 100 时只能说心率样本较少、心率区间判断有限，不能据此推断佩戴或整体状态。",
         "- steps 只能写“步”；distance_walk_run_m 才能写“米/公里”。",
-        "- 禁止建议佩戴设备、检查设备、保持监测连续性；禁止推测设备、压力、疲劳、疼痛、饮食、训练目标、训练计划。",
+        forbidLine,
         "- highlights 必须引用真实数字或明确阈值；suggestions 必须对应已有证据。",
         "- 只能输出 ```json 代码块，不要输出 JSON 外文字。",
-        "",
-        "[HEALTH_SUMMARY_JSON]",
-        JSON.stringify(summary),
-        "[/HEALTH_SUMMARY_JSON]",
-    ].join("\n");
+    ];
+    if (hasProfile) {
+        lines.push("", formatUserProfileSection(userProfile));
+    }
+    lines.push("", "[HEALTH_SUMMARY_JSON]", JSON.stringify(summary), "[/HEALTH_SUMMARY_JSON]");
+    return lines.join("\n");
 }
 async function postJson(url, body) {
     const response = await fetch(url, {
@@ -438,7 +512,7 @@ function resolveDirectDmRuntime(ctx) {
         channel: ctx.channelRuntime,
     };
 }
-async function dispatchDailyReportRequest(ctx, requestId, summary) {
+async function dispatchDailyReportRequest(ctx, requestId, summary, userProfile) {
     const runtime = resolveDirectDmRuntime(ctx);
     if (!runtime) {
         logWithContext(ctx, `[schejo] inbound_error: channelRuntime not available request_id=${requestId}`);
@@ -456,7 +530,7 @@ async function dispatchDailyReportRequest(ctx, requestId, summary) {
     });
     let delivered = false;
     let deliveryResult;
-    const rawBody = buildDailyReportPrompt(requestId, summary);
+    const rawBody = buildDailyReportPrompt(requestId, summary, userProfile);
     await dispatchInboundDirectDmWithRuntime({
         cfg: ctx.cfg,
         runtime,
@@ -603,13 +677,17 @@ function createSchejoRequestPullTool() {
                 const pull = await requestActiveHealthPull(pluginRequestId);
                 log(`[schejo] active_pull_requested plugin_request_id=${pluginRequestId} request_id=${pull.requestId}`);
                 const inbound = await summaryPromise;
-                log(`[schejo] active_pull_matched plugin_request_id=${pluginRequestId} request_id=${inbound.requestId}`);
-                return jsonResult({
+                log(`[schejo] active_pull_matched plugin_request_id=${pluginRequestId} request_id=${inbound.requestId} with_profile=${inbound.userProfile ? "true" : "false"}`);
+                const toolResult = {
                     status: "ready",
                     request_id: inbound.requestId,
                     plugin_request_id: pluginRequestId,
                     summary: inbound.summary,
-                });
+                };
+                if (inbound.userProfile) {
+                    toolResult.user_profile = inbound.userProfile;
+                }
+                return jsonResult(toolResult);
             }
             catch (error) {
                 cancelPendingActivePull(pluginRequestId);
@@ -684,6 +762,8 @@ async function handleInboundEvent(ctx, event) {
         const requestId = readString(event.request_id);
         const pluginRequestId = readString(event.plugin_request_id);
         const summary = asRecord(event.summary);
+        const userProfileRaw = event.user_profile;
+        const userProfile = isRecord(userProfileRaw) ? userProfileRaw : undefined;
         if (!requestId) {
             logWithContext(ctx, "[schejo] inbound_error: daily_report_request missing request_id");
             return;
@@ -692,17 +772,18 @@ async function handleInboundEvent(ctx, event) {
             logWithContext(ctx, `[schejo] inbound_error: daily_report_request missing summary request_id=${requestId}`);
             return;
         }
-        logWithContext(ctx, `[schejo] inbound type=daily_report_request request_id=${requestId} summary_bytes=${Buffer.byteLength(JSON.stringify(summary))}`);
+        logWithContext(ctx, `[schejo] inbound type=daily_report_request request_id=${requestId} summary_bytes=${Buffer.byteLength(JSON.stringify(summary))} with_profile=${userProfile ? "true" : "false"}`);
         if (pluginRequestId &&
             resolvePendingActivePull({
                 pluginRequestId,
                 requestId,
                 summary,
+                userProfile,
             })) {
             logWithContext(ctx, `[schejo] inbound_matched_active_pull plugin_request_id=${pluginRequestId} request_id=${requestId}`);
             return;
         }
-        await dispatchDailyReportRequest(ctx, requestId, summary);
+        await dispatchDailyReportRequest(ctx, requestId, summary, userProfile);
         return;
     }
     if (type !== "ping") {
