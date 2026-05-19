@@ -36,7 +36,11 @@ const SCHEJO_SKILL_PREFIX = "使用schejo skill。";
 const SCHEJO_SKILL_PREFIX_WITH_SPACE = "使用schejo skill 。";
 const LEGACY_THIN_SLICE_SKILL_PREFIX = "请使用schejo skill,";
 const THIN_SLICE_REPLY_PREFIX = "spike-ack:";
-const THIN_SLICE_FALLBACK_DELAY_MS = 1500;
+// MVP-1 时代的 ping 兜底——若 agent 在该时长内没回复，plugin 用 "spike-ack: <body>"
+// 自己应一句，保证 iPhone 收到回执（防 SSE 链路看起来死掉）。MVP-4.5 起 iPhone
+// 改成发任意自由文本，真 LLM 推理常常 5-15 秒，所以原 1500ms 会被 timer 抢先发 ack
+// 把真 LLM reply 阻塞掉。放到 60s 既保留 ping/链路死锁兜底，又让正常 LLM 回复跑完。
+const THIN_SLICE_FALLBACK_DELAY_MS = 60_000;
 const DAILY_REPORT_PROMPT_PREFIX = `${SCHEJO_SKILL_PREFIX}请生成今日健康报告`;
 const DAILY_REPORT_PENDING_TTL_MS = 5 * 60 * 1000;
 const ACTIVE_PULL_TIMEOUT_MS = 90 * 1000;
