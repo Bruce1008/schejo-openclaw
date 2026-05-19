@@ -10,7 +10,6 @@ const DEFAULT_ACCOUNT_ID = "ios";
 const SCHEJO_SKILL_PREFIX = "使用schejo skill。";
 const SCHEJO_SKILL_PREFIX_WITH_SPACE = "使用schejo skill 。";
 const LEGACY_THIN_SLICE_SKILL_PREFIX = "请使用schejo skill,";
-const THIN_SLICE_REPLY_PREFIX = "spike-ack:";
 // MVP-1 时代的 ping 兜底——若 agent 在该时长内没回复，plugin 用 "spike-ack: <body>"
 // 自己应一句，保证 iPhone 收到回执（防 SSE 链路看起来死掉）。MVP-4.5 起 iPhone
 // 改成发任意自由文本，真 LLM 推理常常 5-15 秒，所以原 1500ms 会被 timer 抢先发 ack
@@ -207,9 +206,6 @@ function resolveThinSliceFallbackReply(body) {
         body.startsWith(SCHEJO_SKILL_PREFIX_WITH_SPACE) ||
         body.startsWith(LEGACY_THIN_SLICE_SKILL_PREFIX);
     return acceptsThinSlicePing ? `spike-ack: ${body}` : undefined;
-}
-function isAllowedThinSliceReply(text) {
-    return text.trimStart().startsWith(THIN_SLICE_REPLY_PREFIX);
 }
 function cleanupPendingDailyReports() {
     const now = Date.now();
@@ -436,10 +432,6 @@ async function postHealthReportToCloud(body) {
     await postJson(endpoint(runtimeState.cloudUrl, "/v1/health/report"), body);
 }
 async function deliverReplyText(ctx, text) {
-    if (!isAllowedThinSliceReply(text)) {
-        logWithContext(ctx, "[schejo] outbound_blocked: non thin-slice reply");
-        throw new Error("non thin-slice outbound blocked");
-    }
     logWithContext(ctx, `[schejo] outbound: ${text}`);
     try {
         await postReplyToCloud(text);
