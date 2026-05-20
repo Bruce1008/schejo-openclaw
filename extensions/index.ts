@@ -58,6 +58,7 @@ type SchejoAccount = {
 type SchejoRuntimeState = {
   cloudUrl: string;
   openclawUserId: string;
+  pairingCode: string;
 };
 
 type PendingDailyReportRequest = {
@@ -121,7 +122,6 @@ type SchejoGatewayContext = ChannelGatewayContext<SchejoAccount>;
 type SchejoDirectDmRuntime = Parameters<typeof dispatchInboundDirectDmWithRuntime>[0]["runtime"];
 
 let runtimeState: SchejoRuntimeState | null = null;
-let confirmedPairKey: string | null = null;
 let activeGatewayContext: SchejoGatewayContext | null = null;
 const pendingDailyReports = new Map<string, PendingDailyReportRequest>();
 const pendingActivePulls = new Map<string, PendingActivePull>();
@@ -1451,6 +1451,7 @@ async function handleInboundEvent(ctx: SchejoGatewayContext, event: SchejoSseEve
 
 async function runSseLoop(params: {
   ctx: SchejoGatewayContext;
+  code: string;
   cloudUrl: string;
   openclawUserId: string;
   signal: AbortSignal;
@@ -1475,6 +1476,20 @@ async function runSseLoop(params: {
       }
 
       log("[schejo] sse_connected");
+
+      // cloud pairings 是 in-memory：cloud restart 之后会清空，但 plugin SSE
+      // 会自动重连。借每次 sse_connected 重发 pair_confirm 让 pairing 自愈，
+      // 否则 iPhone 端 analyze 会一直撞 not_paired 直到 plugin 重启。
+      try {
+        await confirmPair({
+          code: params.code,
+          cloudUrl: params.cloudUrl,
+          openclawUserId: params.openclawUserId,
+        });
+      } catch (error) {
+        log(`[schejo] pair_reconfirm_failed: ${formatError(error)}`);
+      }
+
       await readSseStream({
         response,
         signal: params.signal,
@@ -1501,25 +1516,17 @@ async function confirmPair(params: {
   cloudUrl: string;
   openclawUserId: string;
 }): Promise<void> {
-  const pairKey = `${params.code}:${params.openclawUserId}:${params.cloudUrl}`;
   runtimeState = {
     cloudUrl: params.cloudUrl,
     openclawUserId: params.openclawUserId,
+    pairingCode: params.code,
   };
-
-  log(`[schejo] received_code: ${params.code}`);
-
-  if (confirmedPairKey === pairKey) {
-    log("[schejo] pair_confirmed");
-    return;
-  }
 
   await postJson(endpoint(params.cloudUrl, "/v1/pair/confirm"), {
     code: params.code,
     openclaw_user_id: params.openclawUserId,
   });
-  confirmedPairKey = pairKey;
-  log("[schejo] pair_confirmed");
+  log(`[schejo] pair_confirmed code=${params.code}`);
 }
 
 async function pairWithConfig(cfg: OpenClawConfig): Promise<void> {
@@ -1668,6 +1675,7 @@ const schejoChannelBase = {
       if (runtimeState) {
         await runSseLoop({
           ctx,
+          code: runtimeState.pairingCode,
           cloudUrl: runtimeState.cloudUrl,
           openclawUserId: runtimeState.openclawUserId,
           signal: ctx.abortSignal,

@@ -19,7 +19,6 @@ const DAILY_REPORT_PROMPT_PREFIX = `${SCHEJO_SKILL_PREFIX}请生成今日健康�
 const DAILY_REPORT_PENDING_TTL_MS = 5 * 60 * 1000;
 const ACTIVE_PULL_TIMEOUT_MS = 90 * 1000;
 let runtimeState = null;
-let confirmedPairKey = null;
 let activeGatewayContext = null;
 const pendingDailyReports = new Map();
 const pendingActivePulls = new Map();
@@ -1133,6 +1132,19 @@ async function runSseLoop(params) {
                 throw new Error(`HTTP ${response.status}`);
             }
             log("[schejo] sse_connected");
+            // cloud pairings 是 in-memory：cloud restart 之后会清空，但 plugin SSE
+            // 会自动重连。借每次 sse_connected 重发 pair_confirm 让 pairing 自愈，
+            // 否则 iPhone 端 analyze 会一直撞 not_paired 直到 plugin 重启。
+            try {
+                await confirmPair({
+                    code: params.code,
+                    cloudUrl: params.cloudUrl,
+                    openclawUserId: params.openclawUserId,
+                });
+            }
+            catch (error) {
+                log(`[schejo] pair_reconfirm_failed: ${formatError(error)}`);
+            }
             await readSseStream({
                 response,
                 signal: params.signal,
@@ -1153,22 +1165,16 @@ async function runSseLoop(params) {
     }
 }
 async function confirmPair(params) {
-    const pairKey = `${params.code}:${params.openclawUserId}:${params.cloudUrl}`;
     runtimeState = {
         cloudUrl: params.cloudUrl,
         openclawUserId: params.openclawUserId,
+        pairingCode: params.code,
     };
-    log(`[schejo] received_code: ${params.code}`);
-    if (confirmedPairKey === pairKey) {
-        log("[schejo] pair_confirmed");
-        return;
-    }
     await postJson(endpoint(params.cloudUrl, "/v1/pair/confirm"), {
         code: params.code,
         openclaw_user_id: params.openclawUserId,
     });
-    confirmedPairKey = pairKey;
-    log("[schejo] pair_confirmed");
+    log(`[schejo] pair_confirmed code=${params.code}`);
 }
 async function pairWithConfig(cfg) {
     const code = resolvePairingCodeFromConfig(cfg);
@@ -1308,6 +1314,7 @@ const schejoChannelBase = {
             if (runtimeState) {
                 await runSseLoop({
                     ctx,
+                    code: runtimeState.pairingCode,
                     cloudUrl: runtimeState.cloudUrl,
                     openclawUserId: runtimeState.openclawUserId,
                     signal: ctx.abortSignal,
