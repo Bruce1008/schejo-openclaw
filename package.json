@@ -1,6 +1,6 @@
 {
   "name": "schejo",
-  "version": "0.1.20",
+  "version": "0.2.0",
   "description": "Schejo iOS app channel for OpenClaw thin-slice pairing",
   "type": "module",
   "main": "./dist/extensions/index.js",
