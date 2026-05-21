@@ -11,7 +11,6 @@
     "dist/",
     "extensions/",
     "skills/",
-    "SKILL.md",
     "README.md",
     "openclaw.mjs",
     "openclaw.plugin.json"

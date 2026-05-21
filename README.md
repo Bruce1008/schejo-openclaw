@@ -4,7 +4,8 @@ This public repository owns the OpenClaw side of Schejo:
 
 - native OpenClaw channel id: `schejo`
 - plugin runtime entry: `dist/extensions/index.js`
-- skill instructions: `skills/schejo/SKILL.md`
+- skill router: `skills/schejo/SKILL.md`
+- skill step files: `skills/schejo/steps/*.md`
 - cloud relay default: `http://111.230.239.136/schejo`
 
 Version source of truth: `package.json` and `openclaw.plugin.json` must match.
@@ -16,7 +17,7 @@ Version source of truth: `package.json` and `openclaw.plugin.json` must match.
 - daily-report dispatch into OpenClaw
 - active pull tools `schejo_request_pull` + `schejo_submit_report` for ad-hoc / cron turns
 - outbound JSON extraction and relay back to cloud
-- Schejo skill instructions
+- Schejo skill router and step files
 
 ## Install Prompt Template
 
