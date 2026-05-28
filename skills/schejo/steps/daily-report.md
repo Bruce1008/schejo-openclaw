@@ -28,6 +28,8 @@ Optional `UserProfile` (`profile-0.1`) may appear as a `## 用户画像（profil
 ## Route
 
 - If raw text contains `请生成今日健康报告` and `[HEALTH_SUMMARY_JSON]`, generate one DailyReport JSON from the provided HealthSummary.
+  - Do not call any tool in this passive report route.
+  - Output only the fenced `json` code block; the plugin will parse and submit it to cloud.
 - If the user asks to generate today's health report or check current body state but raw text has no `[HEALTH_SUMMARY_JSON]`:
   1. Call `schejo_request_pull` once.
   2. If it returns `status="ready"`, generate a DailyReport from `summary`; if `user_profile` is present, apply profile rules below.
@@ -36,7 +38,7 @@ Optional `UserProfile` (`profile-0.1`) may appear as a `## 用户画像（profil
   5. If any tool returns `status="timeout"` or `status="failed"`, return compact JSON `{ "status": "...", "message": "..." }`.
   6. Do not show active-pull `report_json` directly to the user.
 
-Daily report routes may only call `schejo_request_pull` and `schejo_submit_report`.
+Active-pull daily report routes may only call `schejo_request_pull` and `schejo_submit_report`.
 
 ## Output
 

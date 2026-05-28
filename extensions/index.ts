@@ -43,6 +43,15 @@ const THIN_SLICE_FALLBACK_DELAY_MS = 60_000;
 const DAILY_REPORT_PROMPT_PREFIX = `${SCHEJO_SKILL_PREFIX}请生成今日健康报告`;
 const DAILY_REPORT_PENDING_TTL_MS = 5 * 60 * 1000;
 const ACTIVE_PULL_TIMEOUT_MS = 90 * 1000;
+const DAILY_REPORT_KEY_METRIC_KEYS = [
+  "resting_hr_bpm",
+  "hrv_sdnn_ms",
+  "sleep_total_min",
+  "sleep_efficiency",
+  "steps",
+  "exercise_min",
+  "active_kcal",
+] as const;
 
 type JsonRecord = Record<string, unknown>;
 type SchejoSendResult = ChannelSendRawResult;
@@ -66,6 +75,7 @@ type PendingDailyReportRequest = {
   summary: JsonRecord;
   createdAt: number;
   rawOutput?: string;
+  submittedReport?: JsonRecord;
 };
 
 type DailyReportDeliveryResult =
@@ -148,6 +158,35 @@ function readString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function readFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function roundMetric(value: unknown): number {
+  const number = readFiniteNumber(value);
+  return number === undefined ? 0 : Math.round(number);
+}
+
+function round2Metric(value: unknown): number {
+  const number = readFiniteNumber(value);
+  return number === undefined ? 0 : Math.round(number * 100) / 100;
+}
+
+function coalesceNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const number = readFiniteNumber(value);
+    if (number !== undefined) return number;
+  }
+  return undefined;
 }
 
 function pickPath(root: unknown, path: readonly string[]): unknown {
@@ -362,6 +401,80 @@ function parseDailyReport(raw: string): { ok: true; report: JsonRecord } | { ok:
   return { ok: false, error: `parse: ${lastError}` };
 }
 
+function normalizeDailyReportKeyMetrics(report: JsonRecord, summary?: JsonRecord): JsonRecord {
+  if (summary) {
+    return {
+      resting_hr_bpm: roundMetric(
+        coalesceNumber(
+          pickPath(summary, ["heart_rate", "resting_bpm"]),
+          pickPath(summary, ["heart_rate", "hr_p5"]),
+          0,
+        ),
+      ),
+      hrv_sdnn_ms: roundMetric(
+        coalesceNumber(pickPath(summary, ["heart_rate", "hrv_sdnn_avg_ms"]), 0),
+      ),
+      sleep_total_min: roundMetric(
+        coalesceNumber(pickPath(summary, ["sleep", "total_asleep_min"]), 0),
+      ),
+      sleep_efficiency: round2Metric(
+        coalesceNumber(pickPath(summary, ["sleep", "sleep_efficiency"]), 0),
+      ),
+      steps: roundMetric(coalesceNumber(pickPath(summary, ["activity_24h", "steps"]), 0)),
+      exercise_min: roundMetric(
+        coalesceNumber(pickPath(summary, ["activity_24h", "exercise_minutes"]), 0),
+      ),
+      active_kcal: roundMetric(
+        coalesceNumber(pickPath(summary, ["activity_24h", "active_energy_kcal"]), 0),
+      ),
+    };
+  }
+
+  const metrics = asRecord(report.key_metrics);
+  const normalized: JsonRecord = {};
+  for (const key of DAILY_REPORT_KEY_METRIC_KEYS) {
+    normalized[key] = key === "sleep_efficiency" ? round2Metric(metrics[key]) : roundMetric(metrics[key]);
+  }
+  return normalized;
+}
+
+function normalizeDailyReportQuestion(question: JsonRecord): JsonRecord {
+  const context = asRecord(question.context);
+  const kind = readString(context.kind);
+  const normalizedContext: JsonRecord = {
+    kind: kind ?? "injury_check",
+  };
+  if (kind === "injury_check") {
+    normalizedContext.injury_idx = roundMetric(context.injury_idx);
+  }
+
+  return {
+    question_id: question.question_id,
+    text: question.text,
+    quick_answers: question.quick_answers,
+    free_text_allowed: typeof question.free_text_allowed === "boolean" ? question.free_text_allowed : true,
+    context: normalizedContext,
+  };
+}
+
+function normalizeDailyReportForSubmit(report: JsonRecord, summary?: JsonRecord): JsonRecord {
+  const schemaVersion = readString(report.schema_version) === "report-0.3" ? "report-0.3" : "report-0.2";
+  const normalized: JsonRecord = {
+    schema_version: schemaVersion,
+    generated_at: report.generated_at,
+    summary: report.summary,
+    key_metrics: normalizeDailyReportKeyMetrics(report, summary),
+    highlights: report.highlights,
+    suggestions: report.suggestions,
+  };
+
+  if (schemaVersion === "report-0.3" && isRecord(report.question)) {
+    normalized.question = normalizeDailyReportQuestion(report.question);
+  }
+
+  return normalized;
+}
+
 function resolveThinSliceFallbackReply(body: string): string | undefined {
   const acceptsThinSlicePing =
     body.startsWith(SCHEJO_SKILL_PREFIX) ||
@@ -529,6 +642,7 @@ function buildDailyReportPrompt(
     "- 只根据下面 HealthSummary 输出 JSON；禁止编造任何未出现事实。",
     schemaLine,
     "- 缺失/null/样本不足时说数据不完整或无法判断，不能把缺失数据当作好坏。",
+    "- key_metrics 只能且必须包含这 7 个 key：resting_hr_bpm, hrv_sdnn_ms, sleep_total_min, sleep_efficiency, steps, exercise_min, active_kcal；禁止任何其它 key。",
     "- key_metrics 的 7 个值必须都是有限数字；缺失/无法判断时填 0，禁止 null、字符串或省略字段。",
     "- 严重缺数据时 summary 必须以“数据不完整”开头，不得判断整体身体状态。",
     "- hr_sample_count < 100 时只能说心率样本较少、心率区间判断有限，不能据此推断佩戴或整体状态。",
@@ -627,12 +741,24 @@ async function postReplyToCloud(text: string): Promise<void> {
   });
 }
 
-async function postHealthReportToCloud(body: JsonRecord): Promise<void> {
+function assertHealthReportCloudResult(result: JsonRecord, expectedStatus: "ready" | "failed"): void {
+  if (result.ok !== true) {
+    throw new Error(`cloud returned ok=${String(result.ok)}`);
+  }
+
+  const status = readString(result.status);
+  if (status && status !== expectedStatus) {
+    const message = readString(result.error_message) ?? readString(result.error) ?? "unknown error";
+    throw new Error(`cloud returned status=${status}: ${message}`);
+  }
+}
+
+async function postHealthReportToCloud(body: JsonRecord): Promise<JsonRecord> {
   if (!runtimeState) {
     throw new Error("runtime is not paired");
   }
 
-  await postJson(endpoint(runtimeState.cloudUrl, "/v1/health/report"), body);
+  return postJsonForBody(endpoint(runtimeState.cloudUrl, "/v1/health/report"), body);
 }
 
 async function deliverReplyText(ctx: object, text: string): Promise<void> {
@@ -686,11 +812,28 @@ async function deliverDailyReportReplyPayload(
   );
 
   const parsed = parseDailyReport(text);
+  if (!parsed.ok && pending?.submittedReport) {
+    pendingDailyReports.delete(requestId);
+    logWithContext(
+      ctx,
+      `[schejo] report_reply_ignored_after_tool_submit request_id=${requestId}: ${parsed.error}`,
+    );
+    return {
+      status: "ready",
+      requestId,
+      rawOutput: text,
+      report: pending.submittedReport,
+    };
+  }
+
+  const normalizedReport = parsed.ok
+    ? normalizeDailyReportForSubmit(parsed.report, pending?.summary)
+    : undefined;
   const statusBody: JsonRecord = parsed.ok
     ? {
         request_id: requestId,
         status: "ready",
-        report_json: parsed.report,
+        report_json: normalizedReport,
       }
     : {
         request_id: requestId,
@@ -703,7 +846,8 @@ async function deliverDailyReportReplyPayload(
   }
 
   try {
-    await postHealthReportToCloud(statusBody);
+    const cloudResult = await postHealthReportToCloud(statusBody);
+    assertHealthReportCloudResult(cloudResult, parsed.ok ? "ready" : "failed");
     pendingDailyReports.delete(requestId);
     logWithContext(
       ctx,
@@ -733,7 +877,7 @@ async function deliverDailyReportReplyPayload(
     status: "ready",
     requestId,
     rawOutput: text,
-    report: parsed.report,
+    report: normalizedReport ?? parsed.report,
   };
 }
 
@@ -1341,17 +1485,23 @@ function createSchejoSubmitReportTool() {
       }
 
       try {
-        await postHealthReportToCloud({
+        const pending = pendingDailyReports.get(requestId);
+        const normalizedReport = normalizeDailyReportForSubmit(report, pending?.summary);
+        const cloudResult = await postHealthReportToCloud({
           request_id: requestId,
           status: "ready",
-          report_json: report,
+          report_json: normalizedReport,
         });
+        assertHealthReportCloudResult(cloudResult, "ready");
 
+        if (pending) {
+          pending.submittedReport = normalizedReport;
+        }
         log(`[schejo] active_report_posted request_id=${requestId}`);
         return jsonResult({
           status: "ready",
           request_id: requestId,
-          channel_text: renderDailyReportForChannel(report),
+          channel_text: renderDailyReportForChannel(normalizedReport),
         });
       } catch (error) {
         return jsonResult({
