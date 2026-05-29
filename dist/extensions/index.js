@@ -27,6 +27,26 @@ const DAILY_REPORT_KEY_METRIC_KEYS = [
     "exercise_min",
     "active_kcal",
 ];
+const QUESTION_CONTEXT_KINDS = new Set(["injury_check", "status_change", "signal_capture"]);
+const REPORT_TEXT_UNSUPPORTED_PATTERNS = [
+    /佩戴/,
+    /设备/,
+    /监测连续/,
+    /检查/,
+    /Apple\s*Watch/i,
+    /HealthKit/i,
+    /OpenClaw/i,
+    /prompt/i,
+    /JSON/i,
+    /schema/i,
+    /训练计划/,
+    /训练目标/,
+    /医生/,
+    /就医/,
+    /用药/,
+    /疾病/,
+    /诊断/,
+];
 let runtimeState = null;
 let activeGatewayContext = null;
 const pendingDailyReports = new Map();
@@ -63,11 +83,11 @@ function readFiniteNumber(value) {
 }
 function roundMetric(value) {
     const number = readFiniteNumber(value);
-    return number === undefined ? 0 : Math.round(number);
+    return number === undefined ? 0 : Math.max(0, Math.round(number));
 }
 function round2Metric(value) {
     const number = readFiniteNumber(value);
-    return number === undefined ? 0 : Math.round(number * 100) / 100;
+    return number === undefined ? 0 : Math.max(0, Math.round(number * 100) / 100);
 }
 function coalesceNumber(...values) {
     for (const value of values) {
@@ -76,6 +96,31 @@ function coalesceNumber(...values) {
             return number;
     }
     return undefined;
+}
+function clampMetric(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+}
+function currentIso8601WithOffset() {
+    const shifted = new Date(Date.now() + 8 * 60 * 60 * 1000);
+    return shifted.toISOString().replace(/\.\d{3}Z$/, "+08:00");
+}
+function isIso8601WithOffset(value) {
+    return (typeof value === "string" &&
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+        !Number.isNaN(Date.parse(value)));
+}
+function containsUnsupportedReportText(text) {
+    return REPORT_TEXT_UNSUPPORTED_PATTERNS.some((pattern) => pattern.test(text));
+}
+function clipText(text, maxChars) {
+    return text.length <= maxChars ? text : text.slice(0, maxChars);
+}
+function normalizeReportText(value, maxChars, fallback) {
+    const text = readString(value);
+    if (!text || containsUnsupportedReportText(text)) {
+        return clipText(fallback, maxChars);
+    }
+    return clipText(text, maxChars);
 }
 function pickPath(root, path) {
     let current = root;
@@ -241,7 +286,7 @@ function normalizeDailyReportKeyMetrics(report, summary) {
             resting_hr_bpm: roundMetric(coalesceNumber(pickPath(summary, ["heart_rate", "resting_bpm"]), pickPath(summary, ["heart_rate", "hr_p5"]), 0)),
             hrv_sdnn_ms: roundMetric(coalesceNumber(pickPath(summary, ["heart_rate", "hrv_sdnn_avg_ms"]), 0)),
             sleep_total_min: roundMetric(coalesceNumber(pickPath(summary, ["sleep", "total_asleep_min"]), 0)),
-            sleep_efficiency: round2Metric(coalesceNumber(pickPath(summary, ["sleep", "sleep_efficiency"]), 0)),
+            sleep_efficiency: round2Metric(clampMetric(round2Metric(coalesceNumber(pickPath(summary, ["sleep", "sleep_efficiency"]), 0)), 0, 1)),
             steps: roundMetric(coalesceNumber(pickPath(summary, ["activity_24h", "steps"]), 0)),
             exercise_min: roundMetric(coalesceNumber(pickPath(summary, ["activity_24h", "exercise_minutes"]), 0)),
             active_kcal: roundMetric(coalesceNumber(pickPath(summary, ["activity_24h", "active_energy_kcal"]), 0)),
@@ -250,36 +295,119 @@ function normalizeDailyReportKeyMetrics(report, summary) {
     const metrics = asRecord(report.key_metrics);
     const normalized = {};
     for (const key of DAILY_REPORT_KEY_METRIC_KEYS) {
-        normalized[key] = key === "sleep_efficiency" ? round2Metric(metrics[key]) : roundMetric(metrics[key]);
+        normalized[key] =
+            key === "sleep_efficiency"
+                ? clampMetric(round2Metric(metrics[key]), 0, 1)
+                : roundMetric(metrics[key]);
     }
     return normalized;
 }
+function isSevereDataInsufficient(summary) {
+    if (!summary)
+        return false;
+    const noHeartSignal = roundMetric(pickPath(summary, ["heart_rate", "hr_sample_count"])) === 0 &&
+        roundMetric(pickPath(summary, ["heart_rate", "hrv_sample_count"])) === 0 &&
+        readFiniteNumber(pickPath(summary, ["heart_rate", "resting_bpm"])) === undefined;
+    return (roundMetric(pickPath(summary, ["sleep", "total_in_bed_min"])) < 60 ||
+        roundMetric(pickPath(summary, ["activity_24h", "steps"])) < 100 ||
+        noHeartSignal);
+}
+function isStrongPositiveDay(summary) {
+    if (!summary)
+        return false;
+    const resting = readFiniteNumber(pickPath(summary, ["heart_rate", "resting_bpm"]));
+    const hrv = readFiniteNumber(pickPath(summary, ["heart_rate", "hrv_sdnn_avg_ms"]));
+    return (roundMetric(pickPath(summary, ["sleep", "total_asleep_min"])) >= 420 &&
+        round2Metric(pickPath(summary, ["sleep", "sleep_efficiency"])) >= 0.85 &&
+        roundMetric(pickPath(summary, ["activity_24h", "steps"])) >= 10000 &&
+        roundMetric(pickPath(summary, ["activity_24h", "exercise_minutes"])) >= 30 &&
+        (resting === undefined || resting <= 70) &&
+        (hrv === undefined || hrv >= 30));
+}
+function fallbackDailyReportSummary(summary) {
+    if (isSevereDataInsufficient(summary)) {
+        return "数据不完整，睡眠、活动或心率数据不足，无法判断整体状态。";
+    }
+    if (isStrongPositiveDay(summary)) {
+        return "睡眠、活动和恢复指标较好，今日整体状态有积极依据。";
+    }
+    return "今日数据已同步，建议结合睡眠、活动和心率保守判断。";
+}
+function normalizeDailyReportSummary(value, summary) {
+    let text = normalizeReportText(value, 80, fallbackDailyReportSummary(summary));
+    if (isSevereDataInsufficient(summary) && !text.startsWith("数据不完整")) {
+        text = fallbackDailyReportSummary(summary);
+    }
+    if (isStrongPositiveDay(summary) && text.startsWith("数据不完整")) {
+        text = fallbackDailyReportSummary(summary);
+    }
+    return clipText(text, 80);
+}
+function fallbackHighlights(metrics) {
+    const sleepMin = roundMetric(metrics.sleep_total_min);
+    const sleepEfficiency = Math.round(round2Metric(metrics.sleep_efficiency) * 100);
+    const steps = roundMetric(metrics.steps);
+    const exerciseMin = roundMetric(metrics.exercise_min);
+    return [
+        `睡眠${sleepMin}分钟，效率${sleepEfficiency}%。`,
+        `步数${steps}步，运动${exerciseMin}分钟。`,
+    ];
+}
+function fallbackSuggestions() {
+    return ["今天保持保守活动强度。", "今晚优先保证睡眠。"];
+}
+function normalizeStringList(value, minItems, maxItems, maxChars, fallbacks) {
+    const source = Array.isArray(value) ? value : [];
+    const out = [];
+    for (const item of source) {
+        const text = readString(item);
+        if (!text || containsUnsupportedReportText(text))
+            continue;
+        out.push(clipText(text, maxChars));
+        if (out.length >= maxItems)
+            break;
+    }
+    for (const fallback of fallbacks) {
+        if (out.length >= minItems)
+            break;
+        const text = clipText(fallback, maxChars);
+        if (!containsUnsupportedReportText(text))
+            out.push(text);
+    }
+    while (out.length < minItems) {
+        out.push(clipText(fallbacks[0] ?? "数据不足，保守判断。", maxChars));
+    }
+    return out.slice(0, maxItems);
+}
 function normalizeDailyReportQuestion(question) {
     const context = asRecord(question.context);
-    const kind = readString(context.kind);
+    const rawKind = readString(context.kind);
+    const kind = rawKind && QUESTION_CONTEXT_KINDS.has(rawKind) ? rawKind : "injury_check";
     const normalizedContext = {
-        kind: kind ?? "injury_check",
+        kind,
     };
     if (kind === "injury_check") {
         normalizedContext.injury_idx = roundMetric(context.injury_idx);
     }
+    const quickAnswers = normalizeStringList(question.quick_answers, 2, 4, 6, ["好了", "还没好"]);
     return {
-        question_id: question.question_id,
-        text: question.text,
-        quick_answers: question.quick_answers,
+        question_id: readString(question.question_id) ?? `q-${Date.now()}`,
+        text: normalizeReportText(question.text, 60, "你现在感觉怎么样？"),
+        quick_answers: quickAnswers,
         free_text_allowed: typeof question.free_text_allowed === "boolean" ? question.free_text_allowed : true,
         context: normalizedContext,
     };
 }
 function normalizeDailyReportForSubmit(report, summary) {
     const schemaVersion = readString(report.schema_version) === "report-0.3" ? "report-0.3" : "report-0.2";
+    const metrics = normalizeDailyReportKeyMetrics(report, summary);
     const normalized = {
         schema_version: schemaVersion,
-        generated_at: report.generated_at,
-        summary: report.summary,
-        key_metrics: normalizeDailyReportKeyMetrics(report, summary),
-        highlights: report.highlights,
-        suggestions: report.suggestions,
+        generated_at: isIso8601WithOffset(report.generated_at) ? report.generated_at : currentIso8601WithOffset(),
+        summary: normalizeDailyReportSummary(report.summary, summary),
+        key_metrics: metrics,
+        highlights: normalizeStringList(report.highlights, 2, 4, 30, fallbackHighlights(metrics)),
+        suggestions: normalizeStringList(report.suggestions, 1, 3, 30, fallbackSuggestions()),
     };
     if (schemaVersion === "report-0.3" && isRecord(report.question)) {
         normalized.question = normalizeDailyReportQuestion(report.question);
