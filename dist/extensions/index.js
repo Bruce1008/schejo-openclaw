@@ -1243,6 +1243,41 @@ function createSchejoUpdateStateTool() {
         },
     };
 }
+function createSchejoReadStateTool() {
+    return {
+        name: "schejo_read_state",
+        label: "Schejo Read State",
+        description: "Read-only snapshot of plugin-local state-0.1 (ADR 0008): current user_state.status, active/chronic injuries, and recent body signals (expired ones dropped). Use it to make pre-workout readiness advice injury- and status-aware. Never invent state beyond what this returns.",
+        parameters: Type.Object({}),
+        async execute(_toolCallId, _params) {
+            try {
+                const state = cleanExpiredSignals(loadState());
+                const injuries = state.injuries
+                    .filter((injury) => injury.status === "active" || injury.status === "chronic")
+                    .map((injury) => ({
+                    description: injury.description,
+                    status: injury.status,
+                    next_check_at: injury.next_check_at,
+                }));
+                const signals = state.signals.body.map((signal) => ({
+                    type: signal.type,
+                    detail: signal.detail,
+                    ts: signal.ts,
+                }));
+                log(`[schejo] state_read status=${state.user_state.status} injuries=${injuries.length} signals=${signals.length}`);
+                return jsonResult({
+                    status: "ok",
+                    user_state: state.user_state,
+                    injuries,
+                    signals,
+                });
+            }
+            catch (error) {
+                return jsonResult({ status: "failed", message: formatError(error) });
+            }
+        },
+    };
+}
 function createSchejoSubmitReportTool() {
     return {
         name: "schejo_submit_report",
@@ -1724,6 +1759,7 @@ export default defineChannelPluginEntry({
         api.registerTool(createSchejoAddInjuryTool(), { name: "schejo_add_injury" });
         api.registerTool(createSchejoChangeStatusTool(), { name: "schejo_change_status" });
         api.registerTool(createSchejoUpdateStateTool(), { name: "schejo_update_state" });
+        api.registerTool(createSchejoReadStateTool(), { name: "schejo_read_state" });
         void pairWithCloud(api).catch((error) => {
             log(`[schejo] FATAL: ${formatError(error)}`);
         });
