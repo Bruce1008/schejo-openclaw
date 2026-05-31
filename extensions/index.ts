@@ -635,11 +635,16 @@ function normalizeDailyReportForSubmit(report: JsonRecord, summary?: JsonRecord)
 }
 
 function resolveThinSliceFallbackReply(body: string): string | undefined {
-  const acceptsThinSlicePing =
+  const isSchejoPrefixed =
     body.startsWith(SCHEJO_SKILL_PREFIX) ||
     body.startsWith(SCHEJO_SKILL_PREFIX_WITH_SPACE) ||
     body.startsWith(LEGACY_THIN_SLICE_SKILL_PREFIX);
-  return acceptsThinSlicePing ? `spike-ack: ${body}` : undefined;
+  if (!isSchejoPrefixed) return undefined;
+  // Ping smoke test 仍要字面回显（SKILL.md ping route 契约）。
+  if (body.toLowerCase().includes("ping")) return `spike-ack: ${body}`;
+  // 真实用户内容 / app intent（如 intent=workout.start_session）超时兜底：绝不把原始 prompt
+  // 原样回显给用户（前缀 + JSON 很丑）；给一句中性提示即可。MVP-5 G4 真机暴露。
+  return "schejo 这次没及时返回结果，请稍后在 app 里重试。";
 }
 
 function cleanupPendingDailyReports(): void {
