@@ -587,6 +587,28 @@ function normalizeStringList(
   return out.slice(0, maxItems);
 }
 
+// suggestions 保真（ADR 0015 / 契约 §10.4）：array 有 1-3 条非空字符串就逐条原样保留，
+// 每条仅 500 字异常上限；不过滤禁词、不 clip 30、不替换正文。只有缺失/非数组/空/全空才 fallback。
+// 医疗硬护栏交给 cloud validator 单点（命中则 report status=failed，便于改 prompt），plugin 保真。
+function normalizeSuggestions(value: unknown, fallbacks: string[]): string[] {
+  const source = Array.isArray(value) ? value : [];
+  const out: string[] = [];
+  for (const item of source) {
+    const text = readString(item);
+    if (!text) continue;
+    out.push(clipText(text, 500));
+    if (out.length >= 3) break;
+  }
+
+  if (out.length > 0) return out;
+
+  const fallbackOut = fallbacks
+    .map((fallback) => clipText(fallback, 500))
+    .filter((text) => text.length > 0)
+    .slice(0, 3);
+  return fallbackOut.length > 0 ? fallbackOut : ["今天保持保守活动强度。"];
+}
+
 function normalizeDailyReportQuestion(question: JsonRecord): JsonRecord {
   const context = asRecord(question.context);
   const rawKind = readString(context.kind);
@@ -624,7 +646,7 @@ function normalizeDailyReportForSubmit(report: JsonRecord, summary?: JsonRecord)
     summary: normalizeDailyReportSummary(report.summary, summary),
     key_metrics: metrics,
     highlights: normalizeStringList(report.highlights, 2, 4, 30, fallbackHighlights(metrics)),
-    suggestions: normalizeStringList(report.suggestions, 1, 3, 30, fallbackSuggestions()),
+    suggestions: normalizeSuggestions(report.suggestions, fallbackSuggestions()),
   };
 
   if (schemaVersion === "report-0.3" && isRecord(report.question)) {
@@ -812,7 +834,7 @@ function buildDailyReportPrompt(
     "- hr_sample_count < 100 时只能说心率样本较少、心率区间判断有限，不能据此推断佩戴或整体状态。",
     "- steps 只能写“步”；distance_walk_run_m 才能写“米/公里”。",
     forbidLine,
-    "- highlights 必须引用真实数字或明确阈值；suggestions 必须对应已有证据。",
+    "- highlights 必须引用真实数字或明确阈值；suggestions 必须对应已有证据，写完整具体、可显式点名 profile（如增肌目标 / 进阶训练者 / 旧伤名），不要压成泛化短句。",
     "- 只能输出 ```json 代码块，不要输出 JSON 外文字。",
   ];
 

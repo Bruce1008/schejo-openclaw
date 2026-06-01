@@ -77,7 +77,7 @@ Field constraints:
 - `key_metrics`: exactly `resting_hr_bpm`, `hrv_sdnn_ms`, `sleep_total_min`, `sleep_efficiency`, `steps`, `exercise_min`, `active_kcal`.
 - All `key_metrics` values must be finite numbers. Use `0` for missing or unknowable values; never use null, strings, or omitted fields.
 - `highlights`: 2 to 4 items, each max 30 Chinese characters.
-- `suggestions`: 1 to 3 items, each max 30 Chinese characters.
+- `suggestions`: 1 to 3 items. Write each as a complete, specific sentence — do not compress into a generic short clause. Up to ~500 characters per item is an anomaly guard, not a target length. You may explicitly name profile facts (e.g. 增肌目标 / 进阶训练者 / 半月板旧伤).
 
 ## Field Filling
 
@@ -116,8 +116,8 @@ Field constraints:
 
 Only apply when `## 用户画像（profile-0.1）` is present or `schejo_request_pull` returns `user_profile`:
 
-- `suggestions` must explicitly reference `goal` and `level`.
-- If `injuries` is non-empty and not `无`, at least one suggestion must directly address the injury.
+- `suggestions` must explicitly reference `goal` and `level`, and may name them in plain words (e.g. 增肌目标 / 进阶训练者). Keep each suggestion complete; do not shorten to a generic clause.
+- If `injuries` is non-empty and not `无`, at least one suggestion must directly address the injury (you may name it, e.g. 半月板旧伤 → 避开加重膝关节负荷的动作).
 - Do not invent goals, exercises, sets, intensity, or cycles outside profile.
 - Specific training plans remain out of scope.
 - Profile can override the generic “do not infer training goal” rule; all other grounding rules remain.
