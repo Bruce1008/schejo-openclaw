@@ -23,7 +23,7 @@ Raw text shape (ADR 0012 stable intent; the band is already computed on-device p
 
 ## Route
 
-1. Call `schejo_read_state` once → current `user_state.status`, structured `injuries` (active/chronic), recent `signals`. Combine these with the prompt's `injury_note` (if present) as the full injury context.
+1. Call `schejo_read_state` once → effective `user_state.status`, structured `injuries` (active/chronic), recent `signals`. Combine these with the prompt's `injury_note` (if present) as the full injury context.
 2. Read `band` + `dims` from the prompt JSON. Do not recompute the band.
 3. Produce **0-3** short directional suggestions per the rules below, then return them as plain text.
 

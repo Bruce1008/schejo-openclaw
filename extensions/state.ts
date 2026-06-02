@@ -67,6 +67,12 @@ export interface UserAnswerEvent {
   };
 }
 
+export interface ReadStateSnapshot {
+  user_state: State["user_state"];
+  injuries: Array<Pick<Injury, "description" | "status" | "next_check_at">>;
+  signals: BodySignal[];
+}
+
 function getStatePath(): string {
   return resolve(process.cwd(), STATE_FILE_NAME);
 }
@@ -153,6 +159,55 @@ export function cleanExpiredSignals(state: State, now: Date = new Date()): State
   return { ...state, signals: { body: fresh } };
 }
 
+function hasCurrentInjury(state: State): boolean {
+  return state.injuries.some((injury) => injury.status === "active" || injury.status === "chronic");
+}
+
+function hasActiveInjury(state: State): boolean {
+  return state.injuries.some((injury) => injury.status === "active");
+}
+
+export function normalizeStateStatus(state: State, today: string = todayDate()): State {
+  if (state.user_state.status === "injured" && !hasCurrentInjury(state) && state.signals.body.length === 0) {
+    return {
+      ...state,
+      user_state: { status: "available", since: today, next_check: null }
+    };
+  }
+
+  if (state.user_state.status === "available" && hasActiveInjury(state)) {
+    return {
+      ...state,
+      user_state: { status: "injured", since: today, next_check: state.user_state.next_check }
+    };
+  }
+
+  return state;
+}
+
+export function buildReadStateSnapshot(
+  state: State,
+  now: Date = new Date(),
+  today: string = todayDate()
+): ReadStateSnapshot {
+  const normalized = normalizeStateStatus(cleanExpiredSignals(state, now), today);
+  return {
+    user_state: normalized.user_state,
+    injuries: normalized.injuries
+      .filter((injury) => injury.status === "active" || injury.status === "chronic")
+      .map((injury) => ({
+        description: injury.description,
+        status: injury.status,
+        next_check_at: injury.next_check_at,
+      })),
+    signals: normalized.signals.body.map((signal) => ({
+      type: signal.type,
+      detail: signal.detail,
+      ts: signal.ts,
+    })),
+  };
+}
+
 export function checkReminders(state: State, today: string = todayDate()): Reminder[] {
   const reminders: Reminder[] = [];
   state.injuries.forEach((injury, idx) => {
@@ -216,7 +271,7 @@ function processInjuryCheckAnswer(state: State, event: UserAnswerEvent): State {
   }
 
   updated[idx] = current;
-  return { ...state, injuries: updated };
+  return normalizeStateStatus({ ...state, injuries: updated }, today);
 }
 
 function processStatusChangeAnswer(state: State, event: UserAnswerEvent): State {
@@ -268,7 +323,11 @@ export function addInjury(state: State, input: { description: string; status?: I
     status,
     next_check_at
   };
-  return { ...state, injuries: [...state.injuries, injury] };
+  return {
+    ...state,
+    user_state: { status: "injured", since: today, next_check: next_check_at },
+    injuries: [...state.injuries, injury]
+  };
 }
 
 // 给 LLM 工具调用用：改 user_state.status

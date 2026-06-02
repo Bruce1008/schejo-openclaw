@@ -4,7 +4,7 @@ import { jsonResult } from "openclaw/plugin-sdk/core";
 import { createChannelPluginBase, createChatChannelPlugin, defineChannelPluginEntry, } from "openclaw/plugin-sdk/channel-core";
 import { createRawChannelSendResultAdapter, } from "openclaw/plugin-sdk/channel-send-result";
 import { Type } from "typebox";
-import { addInjury, changeStatus, checkReminders, cleanExpiredSignals, loadState, processAnswer, pushBodySignal, saveState, } from "./state.js";
+import { addInjury, buildReadStateSnapshot, changeStatus, checkReminders, cleanExpiredSignals, loadState, processAnswer, pushBodySignal, saveState, } from "./state.js";
 const CHANNEL_ID = "schejo";
 const DEFAULT_ACCOUNT_ID = "ios";
 const SCHEJO_SKILL_PREFIX = "使用schejo skill。";
@@ -1276,29 +1276,18 @@ function createSchejoReadStateTool() {
     return {
         name: "schejo_read_state",
         label: "Schejo Read State",
-        description: "Read-only snapshot of plugin-local state-0.1 (ADR 0008): current user_state.status, active/chronic injuries, and recent body signals (expired ones dropped). Use it to make pre-workout readiness advice injury- and status-aware. Never invent state beyond what this returns.",
+        description: "Read-only snapshot of plugin-local state-0.1 (ADR 0008): effective user_state.status, active/chronic injuries, and recent body signals (expired ones dropped). If status=injured has no active/chronic injury and no recent body signal, it is reported as available. Use it to make pre-workout readiness advice injury- and status-aware. Never invent state beyond what this returns.",
         parameters: Type.Object({}),
         async execute(_toolCallId, _params) {
             try {
-                const state = cleanExpiredSignals(loadState());
-                const injuries = state.injuries
-                    .filter((injury) => injury.status === "active" || injury.status === "chronic")
-                    .map((injury) => ({
-                    description: injury.description,
-                    status: injury.status,
-                    next_check_at: injury.next_check_at,
-                }));
-                const signals = state.signals.body.map((signal) => ({
-                    type: signal.type,
-                    detail: signal.detail,
-                    ts: signal.ts,
-                }));
-                log(`[schejo] state_read status=${state.user_state.status} injuries=${injuries.length} signals=${signals.length}`);
+                const state = loadState();
+                const snapshot = buildReadStateSnapshot(state);
+                log(`[schejo] state_read status=${snapshot.user_state.status} raw_status=${state.user_state.status} injuries=${snapshot.injuries.length} signals=${snapshot.signals.length}`);
                 return jsonResult({
                     status: "ok",
-                    user_state: state.user_state,
-                    injuries,
-                    signals,
+                    user_state: snapshot.user_state,
+                    injuries: snapshot.injuries,
+                    signals: snapshot.signals,
                 });
             }
             catch (error) {
