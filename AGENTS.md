@@ -6,7 +6,7 @@ Context: the `schejo` skill (`skills/schejo/SKILL.md`) is only a **router** — 
 
 ## One-line standard
 
-Step doc 只固定接口、安全、权威来源和不可越界边界；凡是需要结合运行时上下文做权衡的设计判断，只给原则、优先级和闭合集，不给穷举映射。
+A step doc should only lock down interfaces, safety rules, authoritative sources, and non-negotiable boundaries; for design decisions that require runtime contextual judgment, provide principles, priorities, and closed sets—not exhaustive mappings.
 
 ## Four layers
 
