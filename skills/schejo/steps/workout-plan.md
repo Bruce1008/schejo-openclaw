@@ -1,6 +1,6 @@
 # Workout Plan Steps
 
-**Scope** — Use this doc only to turn one `intent=workout.plan.request` into one `WorkoutPlan` JSON. Nothing else: not readiness advice (that is `workout-readiness`), not state logging, not a daily report.
+**Scope** — Use this doc only to turn one `intent=workout.plan.request` into one `WorkoutPlan` JSON: a full, ordered list of movements for **today's session**. Nothing else: not readiness advice (that is `workout-readiness`), not state logging, not a daily report, not a multi-day program.
 
 ## Contract
 
@@ -21,7 +21,7 @@
 |---|---|
 | `trigger` | `readiness_button` / `training_time_alert` / `adhoc_declare`. Copy verbatim into `source_intent`. |
 | `activity_hint` | The activity the user declared (e.g. `网球`) when `trigger=adhoc_declare`; else null. |
-| `readiness` | `band` + `sleep_h` / `hrv_d` / `rhr_d` + per-dim `dims`. May be null. |
+| `readiness` | `band` + `sleep_h` / `hrv_d` / `rhr_d` + per-dim `dims`. Already computed on-device — **use as given, never recompute**. May be null. |
 | `profile_snapshot` | `goal[]` / `level` / `equipment[]` / `training_time[]` / optional `injury_note`. `equipment` is the user's training **environment**. |
 
 `state` is not in the prompt — read it with `schejo_read_state`, the only tool allowed here.
@@ -30,20 +30,22 @@
 
 ```json
 {
-  "schema_version": "plan-0.1",
+  "schema_version": "plan-0.2",
   "plan_id": "wp-2026-06-03-7c1a",
   "generated_at": "<ISO8601 当前时间 +08:00>",
   "source_intent": "readiness_button",
+  "title": "臀腿 + 爬坡",
+  "activity_type": null,
   "readiness_snapshot": { "band": "yellow", "dims": { "sleep": "green", "hrv": "yellow", "rhr": "green" } },
   "profile_snapshot": { "goal": ["gain_muscle"], "level": "intermediate", "equipment": ["gym"], "training_time": ["evening"] },
-  "state_snapshot": { "status": "available", "injuries": [ { "description": "半月板有伤", "status": "chronic" } ] },
-  "estimated_duration_min": 35,
-  "blocks": [
-    { "block_id": "b1", "modality": "strength", "activity_type": null,
-      "display_title": "下肢力量（避深蹲，护半月板）", "estimated_duration_min": 35,
-      "instructions": "膝关节不适即停；不做深蹲 / 弓步加载，改用器械固定轨迹。",
-      "params": { "exercise_name": "腿举", "sets": 3, "reps": "10-12", "load_hint": "中等 / RPE7", "rest_sec": 90, "equipment": "腿举机" },
-      "transition_to_next": null }
+  "state_snapshot": { "status": "available", "injuries": [] },
+  "estimated_duration_min": 65,
+  "items": [
+    { "item_id": "i1", "kind": "warmup", "name": "动态热身", "group": "热身", "params": { "duration_min": 5 }, "note": "椭圆机或自行车低阻力" },
+    { "item_id": "i2", "kind": "strength", "name": "飞鸟", "group": "主项", "params": { "sets": 4, "reps": 12, "rest_sec": 75, "equipment": "龙门架" }, "note": null },
+    { "item_id": "i3", "kind": "strength", "name": "硬拉", "group": "主项", "params": { "sets": 4, "reps": 12, "rest_sec": 75, "load_hint": "中等 / RPE7", "equipment": "杠铃" }, "note": "背部中立，控制离心" },
+    { "item_id": "i4", "kind": "stretch", "name": "下肢拉伸", "group": "放松", "params": { "duration_min": 5 }, "note": null },
+    { "item_id": "i5", "kind": "cardio", "name": "爬坡走", "group": "有氧", "params": { "duration_min": 40, "incline_deg": 15, "pace": "5km/h" }, "note": null }
   ],
   "custom_fields": null,
   "template_slot": null,
@@ -51,63 +53,65 @@
 }
 ```
 
-- **Envelope**: `schema_version` `plan-0.1` · `plan_id` `wp-<YYYY-MM-DD>-<4 hex>` (echoed back on do / modify / skip) · `generated_at` ISO8601 with `+08:00` · `source_intent` = `trigger` · `readiness_snapshot` / `profile_snapshot` / `state_snapshot` echo what shaped the plan (`state_snapshot` = `status` + the injuries that mattered, each `{ "description", "status" }`) · `estimated_duration_min` int, sum of blocks · `blocks` ordered, ≥1 · `custom_fields` / `template_slot` null · `data_requirements` null, unless an ad-hoc activity needs capture (e.g. hiking → `{ "location": true }`).
-- **Block**: `block_id` · `modality` · `activity_type` (string | null — names the specific activity for title / sub-copy, never drives rendering) · `display_title` · `estimated_duration_min` int · `instructions` (plain Chinese) · `params` (typed below) · `transition_to_next` (string | null).
+- **Envelope**: `schema_version` `plan-0.2` · `plan_id` `wp-<YYYY-MM-DD>-<4 hex>` (echoed back on do / modify / skip) · `generated_at` ISO8601 `+08:00` · `source_intent` = `trigger` · `title` readable session name · `activity_type` ad-hoc tag (`网球` / `徒步`) or `null` · `readiness_snapshot` / `profile_snapshot` / `state_snapshot` echo what shaped the plan · `estimated_duration_min` int = sum of item durations · `items` ordered, ≥1 · `custom_fields` / `template_slot` `null` · `data_requirements` `null`, unless an ad-hoc activity needs capture (e.g. hiking → `{ "location": true }`).
+- **Item**: `item_id` · `kind` · `name` (one movement / segment) · `group` (optional phase label, or `null`) · `params` (object, optional keys) · `note` (string | null).
 
-`modality` — closed set, never invent another:
+`kind` — closed set, never invent another:
 
-| `modality` | for |
+| `kind` | for |
 |---|---|
-| `strength` | resistance work for strength / muscle |
-| `cardio_endurance` | steady aerobic (run / bike / elliptical / incline walk) |
-| `hiit` | high-intensity intervals |
-| `mobility_yoga` | mobility / flexibility / yoga |
-| `recreation` | casual or social sport / play |
-| `competitive_sport` | competitive / match-intent sport |
-| `recovery_rehab` | light restorative or rehab work |
-| `outdoor_endurance` | outdoor distance activity (hiking / trail) |
+| `warmup` | a warm-up movement / segment |
+| `strength` | one resistance exercise (sets × reps) |
+| `cardio` | a steady cardio segment (run / bike / incline walk) |
+| `interval` | high-intensity intervals (work / rest rounds) |
+| `mobility` | a mobility / activation drill |
+| `stretch` | a static stretch / cooldown |
+| `sport` | a sport / play segment (tennis …) |
+| `rest` | a standalone rest period (use sparingly) |
 
-`params` by `modality` (required / optional):
+`params` — all optional; give what's relevant to the `kind`:
 
-| `modality` | Required | Optional |
-|---|---|---|
-| `strength` | `exercise_name`(string) / `sets`(int) / `reps`(int or string like "8-12") | `load_hint`(string) / `rest_sec`(int) / `equipment`(string) |
-| `cardio_endurance` | `activity`(string) / `duration_min`(int) | `intensity_zone`(string) / `target_hr_range`(string) / `pace_hint`(string) |
-| `hiit` | `rounds`(int) / `work_sec`(int) / `rest_sec`(int) / `movements`(string[], non-empty) | — |
-| `mobility_yoga` | `poses` **or** `movements`(string[], at least one non-empty) | `hold_sec`(int) / `breathing_hint`(string) |
-| `recreation` / `competitive_sport` | `sport_name`(string) | `duration_min`(int) / `intensity_hint`(string) / `recording_mode_hint`(string) |
-| `outdoor_endurance` | `activity`(string) | `duration_min`(int) / `distance`(number) / `elevation`(number) / `location_required`(bool) / `gps_hint`(string) |
-| `recovery_rehab` | — (none required) | reuse `mobility_yoga` shape, or carry movements in block `instructions` |
-
-Include the required keys; add optionals only when meaningful.
+| `kind` | common `params` |
+|---|---|
+| `strength` | `sets`(int) / `reps`(int or "8-12") / `rest_sec`(int, inter-set rest) / `load_hint`(string) / `equipment`(string) |
+| `cardio` | `duration_min`(number) / `intensity_hint`(string) / `target_hr_range`(string) / `pace`(string) / `incline_deg`(number) / `distance_km`(number) |
+| `interval` | `rounds`(int) / `work_sec`(int) / `rest_sec`(int) / `intensity_hint`(string) |
+| `warmup` | `duration_sec`(int) or `duration_min`(number) |
+| `stretch` / `mobility` | `duration_min`(number) / `hold_sec`(int) |
+| `sport` | `duration_min`(number) / `intensity_hint`(string) |
+| `rest` | `duration_sec`(int) or `duration_min`(number) |
 
 ## Rails (hard limits — never cross)
 
 | limit | rule |
 |---|---|
-| band | computed on-device — use as given, **never recompute** (authority lives on-device) |
-| injury | never load an active / chronic injured area; pick a joint-friendly alternative and reflect the avoidance in `display_title` / `instructions` |
+| band | computed on-device — use as given, **never recompute** |
+| injury | never load an active / chronic injured area; pick a joint-friendly alternative and reflect the avoidance in `name` / `note` / `title` |
 | equipment | every `params.equipment` must be obtainable in the user's `profile.equipment` environment (semantic judgement, not a string subset) |
 | medical | no diagnosis / medication / medical prescription; intensity only as `*_hint` / zone / range |
-| enum | never invent `modality` (or any other enum) values |
-| grounding | use only the injuries / status / signals read from `schejo_read_state` + `injury_note`; never fabricate |
+| enum | never invent `kind` values |
+| grounding | injuries / status / signals only from `schejo_read_state` + `injury_note`; `profile_snapshot` echoes the prompt only — you **cannot** read profile, so never invent goal / level / equipment that wasn't given |
 | output | output only the single `json`; if no compliant plan is possible, output `{ "status": "failed", "message": "<short Chinese reason>" }`; do not submit to cloud or produce a daily report |
-| user text | `display_title` / `instructions` must not mention HealthKit / Watch / OpenClaw / prompt / JSON / schema / intent |
+| user text | `title` / `name` / `note` must not mention HealthKit / Watch / OpenClaw / prompt / JSON / schema / intent |
 | scope | do not take over scheduling; produce only this step's plan |
 
 ## Runtime Judgement (design within the Rails)
 
-Design this session — which `modality`, whether a second ordered block is worth it (set `transition_to_next` if so), movement choice and where intensity lands — by weighing it all. Don't look it up from a "state → plan" table:
+Design today's session as an **ordered list of items** — warm-ups, the main movements, stretch / cooldown, any cardio — as many items as the session needs:
 
 - Weigh: `goal` × `band` + weak dims × `equipment` × injuries (plus `activity_hint` for ad-hoc).
 - Priority: **safety / injury > band ceiling > goal fit > preference**.
-- Band ceiling: `green` may progress · `yellow` caps volume / intensity · `red` light / restorative · `unknown` conservative. The weak dim tightens it: low `sleep` → cap volume · low `hrv` → avoid sprint intervals · high `rhr` → ease intensity.
-- Usually one focused primary block; add a second ordered block only when it clearly serves the goal.
-- Ad-hoc: map the declared activity to the best-fit `modality` and put the activity name in `activity_type` (casual ↔ competitive → `recreation` ↔ `competitive_sport`).
+- Band ceiling: `green` may progress · `yellow` caps volume / intensity · `red` light / restorative · `unknown` conservative. The weak dim tightens it: low `sleep` → cap volume · low `hrv` → no sprint intervals · high `rhr` → ease intensity.
+- **One item = one movement / segment.** A strength session is **several `strength` items** (e.g. 飞鸟, 硬拉 each its own item), never multiple exercises crammed into one item.
+- **`strength` items always carry `sets`, `reps`, and `rest_sec`** (the Watch renders inter-set rest from `rest_sec`); add `load_hint` / `equipment` as relevant.
+- Use `group` to phase the session (热身 / 主项 / 有氧 / 放松) for sectioned rendering, or `null` to keep it flat.
+- Use `kind: "rest"` only for a standalone rest segment; inter-set rest is the `rest_sec` param on the strength item, not a separate `rest` item.
+- Ad-hoc: `kind: "sport"`, with the activity in top-level `activity_type` (and item `name`).
+- `estimated_duration_min` = the sum of the item durations.
 
 ## Route
 
 1. Call `schejo_read_state` once → `status` + injuries + signals; merge with `injury_note` into the full injury picture (don't double-count a body part).
 2. Take `band` + `dims` as given.
-3. Design the session per *Runtime Judgement*, within the *Rails*.
+3. Design the ordered `items` per *Runtime Judgement*, within the *Rails*.
 4. Output the `WorkoutPlan` JSON.
