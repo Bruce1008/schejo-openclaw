@@ -51,7 +51,7 @@
 }
 ```
 
-- **Envelope**: `schema_version` `plan-0.1` · `plan_id` `wp-<YYYY-MM-DD>-<4 hex>` (echoed back on 做 / 改 / 跳) · `generated_at` ISO8601 with `+08:00` · `source_intent` = `trigger` · `readiness_snapshot` / `profile_snapshot` / `state_snapshot` echo what shaped the plan (`state_snapshot` = `status` + the injuries that mattered, each `{ "description", "status" }`) · `estimated_duration_min` int, sum of blocks · `blocks` ordered, ≥1 · `custom_fields` / `template_slot` null · `data_requirements` null, unless an ad-hoc activity needs capture (e.g. hiking → `{ "location": true }`).
+- **Envelope**: `schema_version` `plan-0.1` · `plan_id` `wp-<YYYY-MM-DD>-<4 hex>` (echoed back on do / modify / skip) · `generated_at` ISO8601 with `+08:00` · `source_intent` = `trigger` · `readiness_snapshot` / `profile_snapshot` / `state_snapshot` echo what shaped the plan (`state_snapshot` = `status` + the injuries that mattered, each `{ "description", "status" }`) · `estimated_duration_min` int, sum of blocks · `blocks` ordered, ≥1 · `custom_fields` / `template_slot` null · `data_requirements` null, unless an ad-hoc activity needs capture (e.g. hiking → `{ "location": true }`).
 - **Block**: `block_id` · `modality` · `activity_type` (string | null — names the specific activity for title / sub-copy, never drives rendering) · `display_title` · `estimated_duration_min` int · `instructions` (plain Chinese) · `params` (typed below) · `transition_to_next` (string | null).
 
 `modality` — closed set, never invent another:
@@ -83,31 +83,31 @@ Include the required keys; add optionals only when meaningful.
 
 ## Rails (hard limits — never cross)
 
-| 约束 | 规则 |
+| limit | rule |
 |---|---|
-| band | 端侧已算，直接用，**不重算**（权威在端侧） |
-| injury | active / chronic 伤处不加载；挑关节友好替代，并在 `display_title` / `instructions` 体现避让 |
-| equipment | `params.equipment` 必须在用户 `profile.equipment` 环境可得（语义判断，非字符串子集） |
-| medical | 不输出诊断 / 用药 / 医疗处方；强度只用 `*_hint` / zone / range |
-| enum | `modality` 等枚举值不自造 |
-| grounding | injuries / status / signals 只用 `schejo_read_state` + `injury_note` 读到的，不编 |
-| output | 只输出单个 `json`；产不出合规 plan 时输出 `{ "status": "failed", "message": "<短中文>" }`；不提交 cloud、不出日报 |
-| user text | `display_title` / `instructions` 不提 HealthKit / Watch / OpenClaw / prompt / JSON / schema / intent |
-| scope | 不抢调度权，只产本步 plan |
+| band | computed on-device — use as given, **never recompute** (authority lives on-device) |
+| injury | never load an active / chronic injured area; pick a joint-friendly alternative and reflect the avoidance in `display_title` / `instructions` |
+| equipment | every `params.equipment` must be obtainable in the user's `profile.equipment` environment (semantic judgement, not a string subset) |
+| medical | no diagnosis / medication / medical prescription; intensity only as `*_hint` / zone / range |
+| enum | never invent `modality` (or any other enum) values |
+| grounding | use only the injuries / status / signals read from `schejo_read_state` + `injury_note`; never fabricate |
+| output | output only the single `json`; if no compliant plan is possible, output `{ "status": "failed", "message": "<short Chinese reason>" }`; do not submit to cloud or produce a daily report |
+| user text | `display_title` / `instructions` must not mention HealthKit / Watch / OpenClaw / prompt / JSON / schema / intent |
+| scope | do not take over scheduling; produce only this step's plan |
 
 ## Runtime Judgement (design within the Rails)
 
-设计这次 session — 选哪个 `modality`、要不要第二个有序 block（多则设 `transition_to_next`）、动作搭配与强度落点 — 综合权衡，别照「状态 → 方案」查表：
+Design this session — which `modality`, whether a second ordered block is worth it (set `transition_to_next` if so), movement choice and where intensity lands — by weighing it all. Don't look it up from a "state → plan" table:
 
-- 权衡输入：`goal` × `band` + 弱维度 × `equipment` × injuries（ad-hoc 再加 `activity_hint`）。
-- 优先级：**安全 / 伤病 > band 天花板 > goal 适配 > 偏好**。
-- band 天花板：`green` 可进阶 · `yellow` 控量控强度 · `red` 轻量恢复 · `unknown` 保守；弱维度收紧（`sleep` 低 → 控量 · `hrv` 低 → 避冲刺间歇 · `rhr` 高 → 降强度）。
-- 通常一个聚焦的主 block；确有助于目标再加一个有序 block。
-- ad-hoc：把声明的活动映射到最贴的 `modality`，活动名放 `activity_type`（休闲 ↔ 竞技 → `recreation` ↔ `competitive_sport`）。
+- Weigh: `goal` × `band` + weak dims × `equipment` × injuries (plus `activity_hint` for ad-hoc).
+- Priority: **safety / injury > band ceiling > goal fit > preference**.
+- Band ceiling: `green` may progress · `yellow` caps volume / intensity · `red` light / restorative · `unknown` conservative. The weak dim tightens it: low `sleep` → cap volume · low `hrv` → avoid sprint intervals · high `rhr` → ease intensity.
+- Usually one focused primary block; add a second ordered block only when it clearly serves the goal.
+- Ad-hoc: map the declared activity to the best-fit `modality` and put the activity name in `activity_type` (casual ↔ competitive → `recreation` ↔ `competitive_sport`).
 
 ## Route
 
-1. `schejo_read_state` 一次 → `status` + injuries + signals；与 `injury_note` 合并成完整伤病图（同部位不重复）。
-2. `band` + `dims` 照用。
-3. 在 Rails 内按 Runtime Judgement 设计 session。
-4. 输出 `WorkoutPlan` JSON。
+1. Call `schejo_read_state` once → `status` + injuries + signals; merge with `injury_note` into the full injury picture (don't double-count a body part).
+2. Take `band` + `dims` as given.
+3. Design the session per *Runtime Judgement*, within the *Rails*.
+4. Output the `WorkoutPlan` JSON.

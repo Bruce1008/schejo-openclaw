@@ -34,6 +34,10 @@ A few — to anchor output **shape**, field **semantics**, or a **tie-break**. O
 - **Not OK for**: modality choice, composition, intensity — scripting these pins runtime judgement to a write-time guess (strictly worse than the model deciding with full context).
 - **Test**: is the table drawing a **boundary** or making a **design**? Boundary → table OK. Design → no table.
 
+## Language
+
+Write instructions in **English**; put **Chinese only inside example output** (the user-facing language) — matching the sibling steps (`daily-report`, `workout-readiness`). Keep one language across a doc and across all step docs, so the router + steps read uniformly.
+
 ## Self-check
 
 - [ ] One Scope line (`only to …`) at the top?
@@ -43,6 +47,7 @@ A few — to anchor output **shape**, field **semantics**, or a **tie-break**. O
 - [ ] No ADR / MVP / history / trigger backstory the executor doesn't need?
 - [ ] Examples anchor shape / semantics / tie-break — not make decisions?
 - [ ] Closed sets fully listed (no inventing); open reasoning explicitly handed over?
+- [ ] One language throughout — English instructions, Chinese only in example output?
 - [ ] Trimmed to the bone: every line is contract, boundary, or judgement frame.
 
 ## Skeleton
