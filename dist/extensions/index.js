@@ -449,6 +449,11 @@ function resolveThinSliceFallbackReply(body) {
     // 原样回显给用户（前缀 + JSON 很丑）；给一句中性提示即可。MVP-5 G4 真机暴露。
     return "schejo 这次没及时返回结果，请稍后在 app 里重试。";
 }
+// plan.request 现场编排整课 plan（综合 profile+readiness+state+伤病推理）常耗 1-2 分钟，超过 60s 抢跑兜底窗口。
+// 这类 intent 不武装抢跑定时器——让 dispatch await 到 agent 算完正常 deliver，不在 60s 处先发兜底把真 plan 锁死。
+function isWorkoutPlanRequestBody(body) {
+    return body.includes("intent=workout.plan.request");
+}
 function cleanupPendingDailyReports() {
     const now = Date.now();
     for (const [requestId, entry] of pendingDailyReports.entries()) {
@@ -1413,7 +1418,10 @@ async function handleInboundEvent(ctx, event) {
     let delivered = false;
     let fallbackSent = false;
     let fallbackTimer;
-    if (fallbackReply) {
+    // plan.request 走「持续生成」：不武装抢跑兜底（见 isWorkoutPlanRequestBody）。dispatch await 到算完正常
+    // deliver；真·空产出仍由下方 dispatch 结束后的事后兜底兜住。app 侧持续「生成中」+ 用户重试是安全网。
+    // 后台存活 / request_id 关联见 todos/workout-plan-delivery-decouple-followups.md。
+    if (fallbackReply && !isWorkoutPlanRequestBody(body)) {
         fallbackTimer = setTimeout(() => {
             if (delivered || fallbackSent) {
                 return;
