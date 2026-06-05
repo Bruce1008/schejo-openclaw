@@ -4,7 +4,7 @@ import { jsonResult } from "openclaw/plugin-sdk/core";
 import { createChannelPluginBase, createChatChannelPlugin, defineChannelPluginEntry, } from "openclaw/plugin-sdk/channel-core";
 import { createRawChannelSendResultAdapter, } from "openclaw/plugin-sdk/channel-send-result";
 import { Type } from "typebox";
-import { addInjury, buildReadStateSnapshot, changeStatus, checkReminders, cleanExpiredSignals, loadState, processAnswer, pushBodySignal, saveState, } from "./state.js";
+import { addInjury, buildReadStateSnapshot, changeStatus, checkReminders, cleanExpiredSignals, loadState, logWorkout, processAnswer, pushBodySignal, saveState, } from "./state.js";
 const CHANNEL_ID = "schejo";
 const DEFAULT_ACCOUNT_ID = "ios";
 const SCHEJO_SKILL_PREFIX = "使用schejo skill。";
@@ -1277,6 +1277,43 @@ function createSchejoUpdateStateTool() {
         },
     };
 }
+function createSchejoLogWorkoutTool() {
+    return {
+        name: "schejo_log_workout",
+        label: "Schejo Log Workout",
+        description: "Append one lightweight workout-plan confirmation to plugin-local state-0.2 workout_log (ADR 0008; durable, no TTL, trace for MVP-8 recent-context learning). Call exactly once per intent=workout.plan.confirm turn: action 'do' (user did the plan) or 'skip' (user skipped). Echo plan_id back from the confirm payload; title / activity_type are optional snapshots. Never call this during plan generation or for a 'modify' request.",
+        parameters: Type.Object({
+            plan_id: Type.String(),
+            action: Type.Union([Type.Literal("do"), Type.Literal("skip")]),
+            title: Type.Optional(Type.String()),
+            activity_type: Type.Optional(Type.String()),
+        }),
+        async execute(_toolCallId, params) {
+            const body = asRecord(params);
+            const planId = readString(body.plan_id);
+            const rawAction = readString(body.action);
+            const action = rawAction === "do" ? "do" : rawAction === "skip" ? "skip" : null;
+            if (!planId || !action) {
+                return jsonResult({ status: "failed", message: "plan_id and action(do|skip) are required" });
+            }
+            try {
+                const state = loadState();
+                const next = logWorkout(state, {
+                    plan_id: planId,
+                    action,
+                    title: readString(body.title) || null,
+                    activity_type: readString(body.activity_type) || null,
+                });
+                saveState(next);
+                log(`[schejo] workout_log action=${action} plan_id=${planId} count=${next.workout_log.length}`);
+                return jsonResult({ status: "ok", workout_log_count: next.workout_log.length });
+            }
+            catch (error) {
+                return jsonResult({ status: "failed", message: formatError(error) });
+            }
+        },
+    };
+}
 function createSchejoReadStateTool() {
     return {
         name: "schejo_read_state",
@@ -1786,6 +1823,7 @@ export default defineChannelPluginEntry({
         api.registerTool(createSchejoChangeStatusTool(), { name: "schejo_change_status" });
         api.registerTool(createSchejoUpdateStateTool(), { name: "schejo_update_state" });
         api.registerTool(createSchejoReadStateTool(), { name: "schejo_read_state" });
+        api.registerTool(createSchejoLogWorkoutTool(), { name: "schejo_log_workout" });
         void pairWithCloud(api).catch((error) => {
             log(`[schejo] FATAL: ${formatError(error)}`);
         });

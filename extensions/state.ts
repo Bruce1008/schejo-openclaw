@@ -6,8 +6,10 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const STATE_SCHEMA_VERSION = "state-0.1";
+const STATE_SCHEMA_VERSION = "state-0.2";
+const LEGACY_STATE_SCHEMA_VERSION = "state-0.1";
 const SIGNAL_TTL_MS = 72 * 60 * 60 * 1000;
+const WORKOUT_LOG_MAX = 60;
 
 const STATE_FILE_NAME = "schejo-state.json";
 
@@ -22,6 +24,16 @@ export type UserStateStatus =
 export type InjuryStatus = "active" | "recovered" | "chronic";
 
 export type QuestionKind = "injury_check" | "status_change" | "signal_capture";
+
+export type WorkoutLogAction = "do" | "skip";
+
+export interface WorkoutLogEntry {
+  plan_id: string;
+  action: WorkoutLogAction;
+  title: string | null;
+  activity_type: string | null;
+  ts: string; // ISO8601 with tz
+}
 
 export interface Injury {
   description: string;
@@ -48,6 +60,8 @@ export interface State {
   signals: {
     body: BodySignal[];
   };
+  // §8.1.4：做/跳确认留痕，为 MVP-8 近 7 天上下文（ADR 0008）。append-only、无 TTL。
+  workout_log: WorkoutLogEntry[];
 }
 
 export interface Reminder {
@@ -94,7 +108,8 @@ function emptyState(): State {
     updated_at: nowIso(),
     user_state: { status: "available", since: today, next_check: null },
     injuries: [],
-    signals: { body: [] }
+    signals: { body: [] },
+    workout_log: []
   };
 }
 
@@ -107,7 +122,25 @@ function isStateShape(value: unknown): value is State {
   if (!Array.isArray(v.injuries)) return false;
   if (!v.signals || typeof v.signals !== "object") return false;
   if (!Array.isArray((v.signals as { body?: unknown }).body)) return false;
+  if (!Array.isArray(v.workout_log)) return false;
   return true;
+}
+
+// state-0.1 → state-0.2：仅补 workout_log + 升 schema_version，保留既有 user_state / injuries /
+// signals（升级时绝不 wipe 旧伤病）。非 0.1 形状原样返回，交给 isStateShape 判定。
+function migrateLegacyState(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const v = value as Record<string, unknown>;
+  if (v.schema_version !== LEGACY_STATE_SCHEMA_VERSION) return value;
+  if (!v.user_state || typeof v.user_state !== "object") return value;
+  if (!Array.isArray(v.injuries)) return value;
+  if (!v.signals || typeof v.signals !== "object") return value;
+  if (!Array.isArray((v.signals as { body?: unknown }).body)) return value;
+  return {
+    ...v,
+    schema_version: STATE_SCHEMA_VERSION,
+    workout_log: Array.isArray(v.workout_log) ? v.workout_log : []
+  };
 }
 
 export function loadState(): State {
@@ -118,11 +151,12 @@ export function loadState(): State {
   try {
     const raw = readFileSync(path, "utf8");
     const parsed = JSON.parse(raw) as unknown;
-    if (!isStateShape(parsed)) {
+    const migrated = migrateLegacyState(parsed);
+    if (!isStateShape(migrated)) {
       backupCorruptFile(path, "shape mismatch");
       return emptyState();
     }
-    return parsed;
+    return migrated;
   } catch (error) {
     backupCorruptFile(path, error instanceof Error ? error.message : String(error));
     return emptyState();
@@ -354,4 +388,22 @@ export function pushBodySignal(state: State, input: { type: string; detail: stri
       ]
     }
   };
+}
+
+// 给 LLM 工具调用用：往 workout_log append 一条做/跳确认留痕（§8.1.4，ADR 0008）。
+// append-only，仅保留最近 WORKOUT_LOG_MAX 条。「改」不走这里（它重排回新 plan）。
+export function logWorkout(
+  state: State,
+  input: { plan_id: string; action: WorkoutLogAction; title?: string | null; activity_type?: string | null }
+): State {
+  const entry: WorkoutLogEntry = {
+    plan_id: input.plan_id.slice(0, 200),
+    action: input.action,
+    title: input.title ? input.title.slice(0, 200) : null,
+    activity_type: input.activity_type ? input.activity_type.slice(0, 200) : null,
+    ts: nowIso()
+  };
+  const next = [...state.workout_log, entry];
+  const trimmed = next.length > WORKOUT_LOG_MAX ? next.slice(next.length - WORKOUT_LOG_MAX) : next;
+  return { ...state, workout_log: trimmed };
 }

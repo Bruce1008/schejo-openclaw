@@ -1,6 +1,6 @@
 ---
 name: schejo
-description: Route Schejo health report, daily reminder, health-state, pre-workout readiness, and training-plan requests for the paired iPhone app. Use when raw text mentions schejo, asks to generate/check today's health report, asks to set or send a daily report reminder, reports short-term health state such as injuries, sickness, travel, busyness, or low motivation, contains intent=workout.start_session (the 要锻炼 readiness request), or contains intent=workout.plan.request.
+description: Route Schejo health report, daily reminder, health-state, pre-workout readiness, and training-plan requests for the paired iPhone app. Use when raw text mentions schejo, asks to generate/check today's health report, asks to set or send a daily report reminder, reports short-term health state such as injuries, sickness, travel, busyness, or low motivation, contains intent=workout.start_session (the 要锻炼 readiness request), contains intent=workout.plan.request, or contains intent=workout.plan.confirm (the 做/跳 confirmation).
 ---
 
 # Schejo Skill - Router
@@ -13,7 +13,8 @@ Before acting, choose exactly one route and read its step file:
 - **Daily report reminder setup / reminder firing**: user says “每天 X 点提醒我看日报/生成日报”, onboarding sends the equivalent text, or a heartbeat asks Schejo to send a daily report reminder. Read `steps/daily-reminder.md`.
 - **State maintenance**: user reports injury, sickness, travel, busyness, low motivation, or short-term discomfort. Read `steps/state.md`.
 - **Workout readiness advice**: raw text contains `intent=workout.start_session` (the iPhone 要锻炼 button uploads a readiness band payload). Read `steps/workout-readiness.md`.
-- **Workout plan generation**: raw text contains `intent=workout.plan.request`. Read `steps/workout-plan.md`.
+- **Workout plan generation**: raw text contains `intent=workout.plan.request`. Read `steps/workout-plan.md`. (This also covers `trigger=modify`, the 改 re-plan.)
+- **Workout plan confirm (做 / 跳)**: raw text contains `intent=workout.plan.confirm`. Read `steps/workout-confirm.md`.
 - **Ping smoke test**: raw text contains both `schejo` and `ping`; reply exactly `spike-ack: <raw text 原文>`.
 
 ## Global Rules

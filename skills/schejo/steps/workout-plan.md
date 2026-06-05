@@ -19,8 +19,10 @@
 
 | Field | Meaning |
 |---|---|
-| `trigger` | `readiness_button` / `training_time_alert` / `adhoc_declare`. Copy verbatim into `source_intent`. |
+| `trigger` | `readiness_button` / `training_time_alert` / `adhoc_declare` / `modify`. Copy verbatim into `source_intent`. |
 | `activity_hint` | The activity the user declared (e.g. `网球`) when `trigger=adhoc_declare`; else null. |
+| `modification_note` | When `trigger=modify`: the user's free-text change to today's plan (e.g. "把今天力量换成有氧" / "时间压到 30 分钟"). Honor it as an overriding instruction while re-planning. Else absent / null. |
+| `prev_plan_id` | When `trigger=modify`: the `plan_id` being changed (audit only). Always mint a **new** `plan_id` for the re-planned output. |
 | `readiness` | `band` + `sleep_h` / `hrv_d` / `rhr_d` + per-dim `dims`. Already computed on-device — **use as given, never recompute**. May be null. |
 | `profile_snapshot` | `goal[]` / `level` / `equipment[]` / `training_time[]` / optional `injury_note`. `equipment` is the user's training **environment**. |
 
@@ -107,6 +109,7 @@ Design today's session as an **ordered list of items** — warm-ups, the main mo
 - Use `group` to phase the session (热身 / 主项 / 有氧 / 放松) for sectioned rendering, or `null` to keep it flat.
 - Use `kind: "rest"` only for a standalone rest segment; inter-set rest is the `rest_sec` param on the strength item, not a separate `rest` item.
 - Ad-hoc: `kind: "sport"`, with the activity in top-level `activity_type` (and item `name`).
+- **`trigger=modify`**: the user wants today's plan changed. Re-design the full ordered `items` honoring `modification_note` as a hard preference layered on `goal` × `band` × equipment × injuries; output a **fresh** plan with a **new** `plan_id` (never reuse `prev_plan_id`). Every Rail still holds (band ceiling, injury avoidance, equipment).
 - `estimated_duration_min` = the sum of the item durations.
 
 ## Route
