@@ -1,6 +1,6 @@
 {
   "name": "schejo",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Schejo iOS app channel for OpenClaw thin-slice pairing",
   "type": "module",
   "main": "./dist/extensions/index.js",
@@ -18,6 +18,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "typebox": "^1.1.37"
   },
   "peerDependencies": {
     "openclaw": ">=2026.5.7"

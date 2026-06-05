@@ -1382,6 +1382,10 @@ function makeDailyReportPromptId(date = new Date()): string {
   return `daily-${formatDateInTimeZone(date, "Asia/Shanghai")}`;
 }
 
+function makeWorkoutPlanPromptId(date = new Date()): string {
+  return `workout-${formatDateInTimeZone(date, "Asia/Shanghai")}`;
+}
+
 async function requestActiveHealthPull(pluginRequestId: string): Promise<{ requestId: string }> {
   if (!runtimeState) {
     throw new Error("runtime is not paired");
@@ -1413,6 +1417,24 @@ async function sendDailyReportPrompt(promptId: string): Promise<{ promptId: stri
 
   if (response.ok !== true) {
     throw new Error("unexpected /v1/health/daily_report_prompt response");
+  }
+
+  return { promptId: readString(response.prompt_id) ?? promptId };
+}
+
+async function sendWorkoutPlanPrompt(promptId: string): Promise<{ promptId: string }> {
+  if (!runtimeState) {
+    throw new Error("runtime is not paired");
+  }
+
+  const response = await postJsonForBody(endpoint(runtimeState.cloudUrl, "/v1/health/daily_report_prompt"), {
+    openclaw_user_id: runtimeState.openclawUserId,
+    prompt_id: promptId,
+    prompt_kind: "workout_plan",
+  });
+
+  if (response.ok !== true) {
+    throw new Error("unexpected /v1/health/daily_report_prompt workout response");
   }
 
   return { promptId: readString(response.prompt_id) ?? promptId };
@@ -1513,6 +1535,45 @@ function createSchejoSendDailyReportPromptTool() {
           status: "ready",
           prompt_id: result.promptId,
           message: "已提醒你打开 Schejo 生成今日健康日报。",
+        });
+      } catch (error) {
+        return jsonResult({
+          status: "failed",
+          prompt_id: promptId,
+          message: formatError(error),
+        });
+      }
+    },
+  };
+}
+
+function createSchejoSendWorkoutPlanPromptTool() {
+  return {
+    name: "schejo_send_workout_plan_prompt",
+    label: "Schejo Send Workout Plan Prompt",
+    description:
+      "Send a visible APNs alert to the paired iPhone reminding the user to open Schejo and generate today's workout plan in the foreground. Use for scheduled training_time reminders; do not generate or send a plan in the alert.",
+    parameters: Type.Object({
+      prompt_id: Type.Optional(Type.String()),
+    }),
+    async execute(_toolCallId: string, params: unknown) {
+      if (!runtimeState) {
+        return jsonResult({
+          status: "failed",
+          message: "schejo runtime is not paired",
+        });
+      }
+
+      const body = asRecord(params);
+      const promptId = readString(body.prompt_id) ?? makeWorkoutPlanPromptId();
+
+      try {
+        const result = await sendWorkoutPlanPrompt(promptId);
+        log(`[schejo] workout_plan_prompt_sent prompt_id=${result.promptId}`);
+        return jsonResult({
+          status: "ready",
+          prompt_id: result.promptId,
+          message: "已提醒你打开 Schejo 安排今日训练。",
         });
       } catch (error) {
         return jsonResult({
@@ -2267,6 +2328,7 @@ export default defineChannelPluginEntry({
   registerFull(api) {
     api.registerTool(createSchejoRequestPullTool(), { name: "schejo_request_pull" });
     api.registerTool(createSchejoSendDailyReportPromptTool(), { name: "schejo_send_daily_report_prompt" });
+    api.registerTool(createSchejoSendWorkoutPlanPromptTool(), { name: "schejo_send_workout_plan_prompt" });
     api.registerTool(createSchejoSubmitReportTool(), { name: "schejo_submit_report" });
     api.registerTool(createSchejoAddInjuryTool(), { name: "schejo_add_injury" });
     api.registerTool(createSchejoChangeStatusTool(), { name: "schejo_change_status" });
