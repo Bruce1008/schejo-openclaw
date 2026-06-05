@@ -1,6 +1,6 @@
 # Workout Record Template Confirm Steps
 
-**Scope** - Use this doc only after the iPhone shows a first-time or adjusted workout recording template candidate and the user taps confirm. Save the template, then return an executable `record-start-0.1` command. Do not generate a training plan and do not write workout_log.
+**Scope** - Use this doc only after the iPhone or Watch shows a first-time or adjusted workout recording template candidate and the user taps confirm. The device starts the Watch workout immediately and sends this intent in parallel so Schejo can save the template for future reuse. Save the template and return a short acknowledgement only. Do not generate a training plan and do not write workout_log.
 
 ## Input
 
@@ -40,13 +40,7 @@
    - `location_type`
    - `display_title`
    - `data_requirements`
-3. If the tool returns `status="saved"`, output exactly one fenced `json` block in the same `record-start-0.1` shape:
-   - copy the saved template fields,
-   - set a fresh `command_id`,
-   - set `generated_at` to now,
-   - set `source_intent="template_confirm"`,
-   - set `template_state="saved"`,
-   - set `needs_user_confirmation=false`.
+3. If the tool returns `status="saved"`, output `{ "status": "saved", "message": "记录模板已保存。" }` only.
 4. If saving fails, output `{ "status": "failed", "message": "<short Chinese reason>" }` only.
 
 Allowed tool: only `schejo_save_workout_record_template`.
@@ -54,6 +48,7 @@ Allowed tool: only `schejo_save_workout_record_template`.
 ## Forbidden
 
 - Never save unless this confirm intent is present.
+- Do not return a `record-start-0.1` command here. The device has already started recording from the confirmed candidate.
 - No `WorkoutPlan` / `plan-0.2`.
 - No exercises, sets, reps, training advice, daily report, state injury/status updates, or workout_log writes.
 - Do not mention HealthKit, OpenClaw, prompt, JSON, schema, or "intent" to the user outside JSON field values.
