@@ -5,6 +5,7 @@ import { createChannelPluginBase, createChatChannelPlugin, defineChannelPluginEn
 import { createRawChannelSendResultAdapter, } from "openclaw/plugin-sdk/channel-send-result";
 import { Type } from "typebox";
 import { addInjury, buildReadStateSnapshot, changeStatus, checkReminders, cleanExpiredSignals, loadState, logWorkout, processAnswer, pushBodySignal, saveState, } from "./state.js";
+import { findRecordingTemplate, HK_WORKOUT_ACTIVITY_TYPES, upsertRecordingTemplate, WORKOUT_LOCATION_TYPES, } from "./recording-templates.js";
 const CHANNEL_ID = "schejo";
 const DEFAULT_ACCOUNT_ID = "ios";
 const SCHEJO_SKILL_PREFIX = "使用schejo skill。";
@@ -1367,6 +1368,108 @@ function createSchejoLogWorkoutTool() {
         },
     };
 }
+const RECORD_DATA_REQUIREMENTS_SCHEMA = Type.Object({
+    duration: Type.Boolean(),
+    heart_rate: Type.Boolean(),
+    active_energy: Type.Boolean(),
+    distance: Type.Boolean(),
+    location: Type.Boolean(),
+});
+function createSchejoFindWorkoutRecordTemplateTool() {
+    return {
+        name: "schejo_find_workout_record_template",
+        label: "Schejo Find Workout Record Template",
+        description: "Look up a plugin-local workout recording template by activity text before generating a record-start command. Use for intent=workout.record.start. Handles stable aliases such as 徒步/hiking so repeated activities reuse the same data requirements.",
+        parameters: Type.Object({
+            activity_hint: Type.String(),
+        }),
+        async execute(_toolCallId, params) {
+            const body = asRecord(params);
+            const activityHint = readString(body.activity_hint);
+            if (!activityHint) {
+                return jsonResult({ status: "failed", message: "activity_hint is required" });
+            }
+            const template = findRecordingTemplate(activityHint);
+            if (!template) {
+                log(`[schejo] recording_template_missing activity=${activityHint}`);
+                return jsonResult({ status: "missing", activity_hint: activityHint });
+            }
+            log(`[schejo] recording_template_found activity=${activityHint} canonical=${template.canonical_activity}`);
+            return jsonResult({ status: "found", template });
+        },
+    };
+}
+function readBoolRecord(value) {
+    if (!isRecord(value))
+        return null;
+    const keys = ["duration", "heart_rate", "active_energy", "distance", "location"];
+    const result = {};
+    for (const key of keys) {
+        if (typeof value[key] !== "boolean")
+            return null;
+        result[key] = value[key];
+    }
+    return result;
+}
+function createSchejoSaveWorkoutRecordTemplateTool() {
+    return {
+        name: "schejo_save_workout_record_template",
+        label: "Schejo Save Workout Record Template",
+        description: "Persist a user-confirmed workout recording template to plugin-local schejo-recording-templates.json. Use only after the iPhone sends intent=workout.record.template.confirm; never save an unconfirmed first-time candidate.",
+        parameters: Type.Object({
+            canonical_activity: Type.String(),
+            aliases: Type.Optional(Type.Array(Type.String())),
+            hk_workout_activity_type: Type.Union(HK_WORKOUT_ACTIVITY_TYPES.map((v) => Type.Literal(v))),
+            location_type: Type.Union(WORKOUT_LOCATION_TYPES.map((v) => Type.Literal(v))),
+            display_title: Type.String(),
+            data_requirements: RECORD_DATA_REQUIREMENTS_SCHEMA,
+        }),
+        async execute(_toolCallId, params) {
+            const body = asRecord(params);
+            const canonicalActivity = readString(body.canonical_activity);
+            const rawHK = readString(body.hk_workout_activity_type);
+            const rawLocation = readString(body.location_type);
+            const displayTitle = readString(body.display_title);
+            const dataRequirements = readBoolRecord(body.data_requirements);
+            const aliases = Array.isArray(body.aliases)
+                ? body.aliases.map((value) => readString(value)).filter((value) => Boolean(value))
+                : [];
+            if (!canonicalActivity || !rawHK || !rawLocation || !displayTitle || !dataRequirements) {
+                return jsonResult({
+                    status: "failed",
+                    message: "canonical_activity, hk_workout_activity_type, location_type, display_title, and data_requirements are required",
+                });
+            }
+            if (!HK_WORKOUT_ACTIVITY_TYPES.includes(rawHK)) {
+                return jsonResult({ status: "failed", message: "unsupported hk_workout_activity_type" });
+            }
+            if (!WORKOUT_LOCATION_TYPES.includes(rawLocation)) {
+                return jsonResult({ status: "failed", message: "unsupported location_type" });
+            }
+            try {
+                const template = upsertRecordingTemplate({
+                    canonical_activity: canonicalActivity,
+                    aliases,
+                    hk_workout_activity_type: rawHK,
+                    location_type: rawLocation,
+                    display_title: displayTitle,
+                    data_requirements: {
+                        duration: dataRequirements.duration,
+                        heart_rate: dataRequirements.heart_rate,
+                        active_energy: dataRequirements.active_energy,
+                        distance: dataRequirements.distance,
+                        location: dataRequirements.location,
+                    },
+                });
+                log(`[schejo] recording_template_saved canonical=${template.canonical_activity}`);
+                return jsonResult({ status: "saved", template });
+            }
+            catch (error) {
+                return jsonResult({ status: "failed", message: formatError(error) });
+            }
+        },
+    };
+}
 function createSchejoReadStateTool() {
     return {
         name: "schejo_read_state",
@@ -1878,6 +1981,8 @@ export default defineChannelPluginEntry({
         api.registerTool(createSchejoUpdateStateTool(), { name: "schejo_update_state" });
         api.registerTool(createSchejoReadStateTool(), { name: "schejo_read_state" });
         api.registerTool(createSchejoLogWorkoutTool(), { name: "schejo_log_workout" });
+        api.registerTool(createSchejoFindWorkoutRecordTemplateTool(), { name: "schejo_find_workout_record_template" });
+        api.registerTool(createSchejoSaveWorkoutRecordTemplateTool(), { name: "schejo_save_workout_record_template" });
         void pairWithCloud(api).catch((error) => {
             log(`[schejo] FATAL: ${formatError(error)}`);
         });
