@@ -6,6 +6,7 @@ import { createRawChannelSendResultAdapter, } from "openclaw/plugin-sdk/channel-
 import { Type } from "typebox";
 import { addInjury, buildReadStateSnapshot, changeStatus, checkReminders, cleanExpiredSignals, loadState, logWorkout, processAnswer, pushBodySignal, saveState, } from "./state.js";
 import { findRecordingTemplate, HK_WORKOUT_ACTIVITY_TYPES, upsertRecordingTemplate, WORKOUT_LOCATION_TYPES, } from "./recording-templates.js";
+import { shouldDeferFallback, tryBuildReusedRecordStartCommand } from "./record-start.js";
 const CHANNEL_ID = "schejo";
 const DEFAULT_ACCOUNT_ID = "ios";
 const SCHEJO_SKILL_PREFIX = "使用schejo skill。";
@@ -449,11 +450,6 @@ function resolveThinSliceFallbackReply(body) {
     // 真实用户内容 / app intent（如 intent=workout.start_session）超时兜底：绝不把原始 prompt
     // 原样回显给用户（前缀 + JSON 很丑）；给一句中性提示即可。MVP-5 G4 真机暴露。
     return "schejo 这次没及时返回结果，请稍后在 app 里重试。";
-}
-// plan.request 现场编排整课 plan（综合 profile+readiness+state+伤病推理）常耗 1-2 分钟，超过 60s 抢跑兜底窗口。
-// 这类 intent 不武装抢跑定时器——让 dispatch await 到 agent 算完正常 deliver，不在 60s 处先发兜底把真 plan 锁死。
-function isWorkoutPlanRequestBody(body) {
-    return body.includes("intent=workout.plan.request");
 }
 function cleanupPendingDailyReports() {
     const now = Date.now();
@@ -1604,6 +1600,15 @@ async function handleInboundEvent(ctx, event) {
         logWithContext(ctx, "[schejo] inbound_error: channelRuntime not available");
         return;
     }
+    // G8.5 A: reused-template fast path. A saved template makes record-start a deterministic lookup,
+    // so answer it here without the slow LLM round-trip (which was getting dropped by the 60s fallback).
+    // First-time activities / template_modify return null below and fall through to the agent.
+    const reusedRecordStart = tryBuildReusedRecordStartCommand(body);
+    if (reusedRecordStart) {
+        logWithContext(ctx, `[schejo] record_start_fastpath canonical=${reusedRecordStart.canonical_activity} command_id=${reusedRecordStart.command_id}`);
+        await deliverReplyText(ctx, JSON.stringify(reusedRecordStart));
+        return;
+    }
     const messageId = readString(event.id) ?? `schejo-in-${randomUUID()}`;
     const timestamp = typeof event.timestamp === "number" && Number.isFinite(event.timestamp)
         ? event.timestamp
@@ -1611,10 +1616,10 @@ async function handleInboundEvent(ctx, event) {
     let delivered = false;
     let fallbackSent = false;
     let fallbackTimer;
-    // plan.request 走「持续生成」：不武装抢跑兜底（见 isWorkoutPlanRequestBody）。dispatch await 到算完正常
-    // deliver；真·空产出仍由下方 dispatch 结束后的事后兜底兜住。app 侧持续「生成中」+ 用户重试是安全网。
-    // 后台存活 / request_id 关联见 todos/workout-plan-delivery-decouple-followups.md。
-    if (fallbackReply && !isWorkoutPlanRequestBody(body)) {
+    // G8.5 B: plan.request / record.start / record.template.confirm 走「持续生成」：不武装 60s 抢跑兜底
+    // （见 shouldDeferFallback）。让 dispatch await 到 agent 算完正常 deliver，不在 60s 处先发兜底把真回复
+    // （含 record-start 命令）锁死丢弃；真·空产出仍由下方 dispatch 结束后的事后兜底兜住。app 侧「生成中」+ 重试是安全网。
+    if (fallbackReply && !shouldDeferFallback(body)) {
         fallbackTimer = setTimeout(() => {
             if (delivered || fallbackSent) {
                 return;
